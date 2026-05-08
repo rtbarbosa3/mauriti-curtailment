@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Downloads parciais
+*.part
+
+# Cache local de dados ONS+CCEE (ficam no GitHub Actions cache)
+cache/
+
+# Output gerado (publicado pelo workflow no branch gh-pages)
+public/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Variaveis de ambiente
+.env
+.env.local
