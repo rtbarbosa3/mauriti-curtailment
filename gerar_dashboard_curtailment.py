@@ -181,10 +181,26 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
     for enc in ("utf-8", "latin-1"):
         try:
             return pd.read_csv(path, sep=";", decimal=",", encoding=enc,
-                               na_values=["", "NULL", "null", "NaN", "-"])
+                               na_values=["", "NULL", "null", "NaN", "-"],
+                               dtype={"ceg": str, "id_ons": str},
+                               low_memory=False)
         except UnicodeDecodeError:
             continue
     raise RuntimeError(f"Nao consegui ler {path}")
+
+
+def _filter_relevant_usinas(df: pd.DataFrame,
+                              patterns: list[str] | None) -> pd.DataFrame:
+    """Mantem apenas linhas onde nom_usina contem algum dos patterns.
+    Reduz drasticamente uso de memoria descartando usinas irrelevantes
+    logo na entrada (antes de concatenar varios meses)."""
+    if df.empty or not patterns or "nom_usina" not in df.columns:
+        return df
+    nom_norm = df["nom_usina"].astype(str).map(_normalize)
+    mask = pd.Series(False, index=df.index)
+    for pat in patterns:
+        mask |= nom_norm.str.contains(pat, na=False, regex=False)
+    return df[mask].copy()
 
 
 # =============================================================================
@@ -210,17 +226,25 @@ def _carrega_mes(url_tpl: str, source: str, kind: str,
     return df.dropna(subset=["din_instante"])
 
 
-def carregar_detalhe(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataFrame:
+def carregar_detalhe(cfg: dict, dt_ini: date, dt_fim: date,
+                       patterns: list[str] | None = None) -> pd.DataFrame:
     cache = _ensure_dir(cfg["cache_dir"])
     today = date.today()
     meses = _months_between(dt_ini, dt_fim)
     print(f"\n[1/4] Detalhe ONS por usina ({len(meses)} meses x 2 fontes)...")
     print(f"      Re-baixando os {cfg['refresh_recent_n']} meses mais recentes.")
+    if patterns:
+        print(f"      Filtrando precocemente {len(patterns)} padroes de usina "
+              "(Mauriti + benchmark) para reduzir memoria.")
     frames = []
     for source, url in (("eolica", URL_DETAIL_EOL), ("solar", URL_DETAIL_UFV)):
         for y, m in tqdm(meses, desc=f"  detail {source:8s}", ncols=80):
             df = _carrega_mes(url, source, "detail", y, m, cache, cfg, today)
-            if df is not None and not df.empty:
+            if df is None or df.empty:
+                continue
+            if patterns:
+                df = _filter_relevant_usinas(df, patterns)
+            if not df.empty:
                 frames.append(df)
     if not frames:
         raise RuntimeError("Nenhum dado de detalhe carregado.")
@@ -230,13 +254,14 @@ def carregar_detalhe(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataFrame:
     for col in ("val_geracaoestimada", "val_geracaoverificada",
                 "val_ventoverificado"):
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce", downcast="float")
     df["nom_usina_norm"] = df["nom_usina"].apply(_normalize)
     print(f"  -> {len(df):,} linhas, {df['nom_usina'].nunique()} usinas distintas")
     return df
 
 
-def carregar_consolidado(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataFrame:
+def carregar_consolidado(cfg: dict, dt_ini: date, dt_fim: date,
+                           patterns: list[str] | None = None) -> pd.DataFrame:
     cache = _ensure_dir(cfg["cache_dir"])
     today = date.today()
     meses = _months_between(dt_ini, dt_fim)
@@ -245,7 +270,11 @@ def carregar_consolidado(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataFrame:
     for source, url in (("eolica", URL_CONS_EOL), ("solar", URL_CONS_UFV)):
         for y, m in tqdm(meses, desc=f"  cons   {source:8s}", ncols=80):
             df = _carrega_mes(url, source, "cons", y, m, cache, cfg, today)
-            if df is not None and not df.empty:
+            if df is None or df.empty:
+                continue
+            if patterns:
+                df = _filter_relevant_usinas(df, patterns)
+            if not df.empty:
                 frames.append(df)
     if not frames:
         print("  [!] Sem consolidado - razoes ficarao 'DESCONHECIDA'.")
@@ -1163,8 +1192,14 @@ def main() -> None:
     dt_fim = (datetime.strptime(cfg["data_fim"], "%Y-%m-%d").date()
               if cfg["data_fim"] else date.today())
 
-    detalhe = carregar_detalhe(cfg, dt_ini, dt_fim)
-    cons    = carregar_consolidado(cfg, dt_ini, dt_fim)
+    # Constroi a lista de padroes (Mauriti + benchmark) pra filtragem precoce
+    # Isso reduz uso de memoria de 5-10 GB para algumas centenas de MB.
+    patterns: list[str] = [_normalize(cfg["mauriti_match"])]
+    patterns += [_normalize(g["match"]) for g in cfg["benchmark_groups"]]
+    patterns = list(dict.fromkeys(patterns))  # dedupe preservando ordem
+
+    detalhe = carregar_detalhe(cfg, dt_ini, dt_fim, patterns=patterns)
+    cons    = carregar_consolidado(cfg, dt_ini, dt_fim, patterns=patterns)
     pld     = carregar_pld(cfg, dt_ini, dt_fim, cfg["submercado"])
 
     print("\n[4/4] Enriquecendo + selecionando grupos...")
