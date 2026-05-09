@@ -284,9 +284,19 @@ def carregar_consolidado(cfg: dict, dt_ini: date, dt_fim: date,
     df = pd.concat(frames, ignore_index=True)
     df = df[(df["din_instante"] >= pd.Timestamp(dt_ini)) &
             (df["din_instante"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1))]
-    df["cod_razaorestricao"] = df["cod_razaorestricao"].fillna("DESCONHECIDA")
-    df["cod_origemrestricao"] = df["cod_origemrestricao"].fillna("DESCONHECIDA")
-    print(f"  -> {len(df):,} linhas com razao/origem")
+    n_total = len(df)
+    # IMPORTANTE: descartar linhas onde cod_razaorestricao eh nulo.
+    # No dataset ONS, ha 1 linha por instante por usina mesmo SEM restricao -
+    # nessas linhas cod_razaorestricao vem nulo. Manter essas linhas confunde
+    # o merge depois. So queremos rows com restricao real.
+    df = df.dropna(subset=["cod_razaorestricao"])
+    n_real = len(df)
+    df["cod_razaorestricao"] = df["cod_razaorestricao"].astype(str).str.strip().str.upper()
+    df["cod_origemrestricao"] = (df["cod_origemrestricao"].fillna("DESCONHECIDA")
+                                   .astype(str).str.strip().str.upper())
+    if "ceg" in df.columns:
+        df["ceg"] = df["ceg"].astype(str).str.strip().str.upper()
+    print(f"  -> {n_real:,} restricoes reais (de {n_total:,} linhas totais)")
     return df
 
 
@@ -349,16 +359,54 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
     df["geracao_mwh"] = df["val_geracaoverificada"].clip(lower=0) * 0.5
     df["estimada_mwh"] = df["val_geracaoestimada"].clip(lower=0) * 0.5
 
+    # Normaliza ceg em detail pra alinhar com consolidado no merge
+    if "ceg" in df.columns:
+        df["ceg"] = df["ceg"].astype(str).str.strip().str.upper()
+    if "id_ons" in df.columns:
+        df["id_ons"] = df["id_ons"].astype(str).str.strip().str.upper()
+
+    n_cortes = int((df["curtailment_mw"] > 0.01).sum())
+    print(f"  Linhas em detail com curtailment > 0: {n_cortes:,}")
+
     if not cons.empty and "cod_razaorestricao" in cons.columns:
-        cons_keys = ["din_instante", "ceg", "cod_razaorestricao",
-                     "cod_origemrestricao"]
-        prio = {"CNF": 0, "REL": 1, "PAR": 2, "ENE": 3, "DESCONHECIDA": 9}
-        c2 = cons[cons_keys].copy()
+        # Mantem apenas as colunas necessarias do consolidado
+        keep = ["din_instante", "ceg", "cod_razaorestricao", "cod_origemrestricao"]
+        if "id_ons" in cons.columns:
+            keep.append("id_ons")
+        c2 = cons[[c for c in keep if c in cons.columns]].copy()
+
+        # Dedupe priorizando razoes ressarciveis
+        prio = {"CNF": 0, "REL": 1, "PAR": 2, "ENE": 3}
         c2["prio"] = c2["cod_razaorestricao"].map(prio).fillna(99)
         c2 = (c2.sort_values(["din_instante", "ceg", "prio"])
                 .drop_duplicates(["din_instante", "ceg"], keep="first")
                 .drop(columns=["prio"]))
-        df = df.merge(c2, on=["din_instante", "ceg"], how="left")
+
+        # 1a tentativa: merge por (din_instante, ceg)
+        df = df.merge(c2[[c for c in c2.columns if c != "id_ons"]],
+                       on=["din_instante", "ceg"], how="left")
+
+        n_match_ceg = int(df.loc[df["curtailment_mw"] > 0.01,
+                                  "cod_razaorestricao"].notna().sum())
+        rate_ceg = (100 * n_match_ceg / max(n_cortes, 1))
+        print(f"  Match via ceg: {n_match_ceg:,}/{n_cortes:,} cortes "
+              f"({rate_ceg:.1f}%)")
+
+        # Fallback: se match baixo, tenta por id_ons
+        if rate_ceg < 50 and "id_ons" in c2.columns and "id_ons" in df.columns:
+            print("  [!] Match baixo via ceg - tentando fallback por id_ons...")
+            df = df.drop(columns=["cod_razaorestricao", "cod_origemrestricao"],
+                          errors="ignore")
+            c3 = c2[["din_instante", "id_ons", "cod_razaorestricao",
+                      "cod_origemrestricao"]].drop_duplicates(
+                          ["din_instante", "id_ons"], keep="first")
+            df = df.merge(c3, on=["din_instante", "id_ons"], how="left")
+            n_match_id = int(df.loc[df["curtailment_mw"] > 0.01,
+                                     "cod_razaorestricao"].notna().sum())
+            rate_id = (100 * n_match_id / max(n_cortes, 1))
+            print(f"  Match via id_ons: {n_match_id:,}/{n_cortes:,} cortes "
+                  f"({rate_id:.1f}%)")
+
     df["cod_razaorestricao"] = df.get("cod_razaorestricao",
                                         pd.Series(dtype=str)).fillna("DESCONHECIDA")
     df["cod_origemrestricao"] = df.get("cod_origemrestricao",
