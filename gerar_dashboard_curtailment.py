@@ -274,6 +274,51 @@ def carregar_detalhe(cfg: dict, dt_ini: date, dt_fim: date,
     return df
 
 
+def carregar_solar_ne_agregado(cfg: dict, dt_ini: date, dt_fim: date,
+                                  pld: pd.DataFrame) -> pd.DataFrame:
+    """Carrega o universo de UFVs do submercado NE e agrega por hora.
+    Retorna DF compacto com colunas: hora, mwh_total_ne, n_usinas.
+    Diferente de carregar_detalhe: NAO filtra por patterns, mas agrega
+    imediatamente cada mes (mantendo memoria baixa)."""
+    cache = _ensure_dir(cfg["cache_dir"])
+    today = date.today()
+    meses = _months_between(dt_ini, dt_fim)
+    print(f"\n[*] Universo solar NE - agregando por hora ({len(meses)} meses)...")
+    rows = []
+    for y, m in tqdm(meses, desc="  solar NE   ", ncols=80):
+        df = _carrega_mes(URL_DETAIL_UFV, "solar", "detail", y, m,
+                            cache, cfg, today)
+        if df is None or df.empty:
+            continue
+        # Filtra submercado NE (id_subsistema)
+        if "id_subsistema" in df.columns:
+            df = df[df["id_subsistema"].astype(str).str.upper().str.strip() == "NE"]
+        if df.empty:
+            continue
+        # Calcula geracao em MWh e agrega por hora cheia
+        df["geracao_mwh"] = (pd.to_numeric(df["val_geracaoverificada"],
+                                              errors="coerce")
+                                .clip(lower=0) * 0.5)
+        df["hora"] = df["din_instante"].dt.floor("h")
+        agg = df.groupby("hora").agg(
+            mwh_total_ne=("geracao_mwh", "sum"),
+            n_usinas=("nom_usina", "nunique"),
+        ).reset_index()
+        rows.append(agg)
+        del df  # libera memoria
+    if not rows:
+        return pd.DataFrame(columns=["hora", "mwh_total_ne", "n_usinas"])
+    out = (pd.concat(rows, ignore_index=True)
+              .groupby("hora")
+              .agg(mwh_total_ne=("mwh_total_ne", "sum"),
+                   n_usinas=("n_usinas", "max"))
+              .reset_index()
+              .sort_values("hora"))
+    print(f"  -> {len(out):,} horas, ate {int(out['n_usinas'].max() or 0)} "
+          "UFVs distintas no NE")
+    return out
+
+
 def carregar_consolidado(cfg: dict, dt_ini: date, dt_fim: date,
                            patterns: list[str] | None = None) -> pd.DataFrame:
     cache = _ensure_dir(cfg["cache_dir"])
@@ -520,6 +565,91 @@ def metricas(df: pd.DataFrame) -> dict:
         pld_geral=float(df["pld"].mean()),
         n_usinas=int(df["nom_usina"].nunique()),
     )
+
+
+# =============================================================================
+#  ANALISE DE MODULACAO (efeito perfil / valor de perfil)
+# =============================================================================
+
+def agregar_horario_mauriti(df_mauriti: pd.DataFrame) -> pd.DataFrame:
+    """Agrega Mauriti (todas as UFVs do complexo) em geracao horaria total."""
+    if df_mauriti.empty:
+        return pd.DataFrame(columns=["hora", "mwh"])
+    df = df_mauriti.copy()
+    df["hora"] = df["din_instante"].dt.floor("h")
+    out = df.groupby("hora")["geracao_mwh"].sum().reset_index()
+    out.columns = ["hora", "mwh"]
+    return out
+
+
+def calcular_modulacao(geracao_horaria: pd.DataFrame,
+                        pld: pd.DataFrame) -> pd.DataFrame:
+    """Cruza geracao horaria com PLD horario e calcula:
+       receita_real (Sum hora h: MWh_h * PLD_h)
+       receita_flat (Sum dia: MWh_dia * PLD_medio_dia)
+       desconto_modulacao_rs = receita_real - receita_flat
+       desconto_modulacao_pct = desconto_rs / receita_flat
+       preco_efetivo = receita_real / MWh
+       Retorna DF diario."""
+    if geracao_horaria.empty or pld.empty:
+        return pd.DataFrame()
+    df = geracao_horaria.merge(pld, on="hora", how="left")
+    df = df.dropna(subset=["pld"])
+    if df.empty:
+        return pd.DataFrame()
+    df["receita_real"] = df["mwh"] * df["pld"]
+    df["dia"] = df["hora"].dt.date
+    diario = df.groupby("dia").agg(
+        mwh_dia=("mwh", "sum"),
+        receita_real=("receita_real", "sum"),
+        pld_avg=("pld", "mean"),
+    ).reset_index()
+    diario["receita_flat"] = diario["mwh_dia"] * diario["pld_avg"]
+    diario["desconto_rs"] = diario["receita_real"] - diario["receita_flat"]
+    diario["desconto_pct"] = (100 * diario["desconto_rs"] /
+                                diario["receita_flat"].replace(0, np.nan))
+    diario["preco_efetivo"] = (diario["receita_real"] /
+                                 diario["mwh_dia"].replace(0, np.nan))
+    return diario
+
+
+def metricas_modulacao(diario: pd.DataFrame) -> dict:
+    """Resume um DF de modulacao diaria em KPIs de periodo."""
+    if diario.empty:
+        return {"vazio": True}
+    rec_real = float(diario["receita_real"].sum())
+    rec_flat = float(diario["receita_flat"].sum())
+    desc_rs = rec_real - rec_flat
+    desc_pct = (100 * desc_rs / rec_flat) if rec_flat > 0 else 0.0
+    mwh_total = float(diario["mwh_dia"].sum())
+    preco_ef = (rec_real / mwh_total) if mwh_total > 0 else 0.0
+    pld_avg = float(diario["pld_avg"].mean())
+    return dict(
+        vazio=False,
+        receita_real=rec_real,
+        receita_flat=rec_flat,
+        desconto_rs=desc_rs,
+        desconto_pct=desc_pct,
+        mwh_total=mwh_total,
+        preco_efetivo=preco_ef,
+        pld_medio=pld_avg,
+        n_dias=int(len(diario)),
+    )
+
+
+def perfil_horario(geracao_horaria: pd.DataFrame,
+                     pld: pd.DataFrame) -> pd.DataFrame:
+    """Calcula o perfil horario tipico (media de cada hora 0-23):
+       Mauriti gen avg by hour vs PLD avg by hour."""
+    if geracao_horaria.empty or pld.empty:
+        return pd.DataFrame()
+    df = geracao_horaria.merge(pld, on="hora", how="left").dropna(subset=["pld"])
+    df["hora_dia"] = df["hora"].dt.hour
+    out = df.groupby("hora_dia").agg(
+        gen_avg=("mwh", "mean"),
+        pld_avg=("pld", "mean"),
+    ).reset_index()
+    return out
 
 
 # =============================================================================
@@ -777,6 +907,173 @@ def g_comp_cf(mdf, grupos: list[Grupo]):
     fig.update_layout(**lay); return fig
 
 
+# ----- Charts da aba MODULACAO -----
+
+def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
+                    today: date | None = None):
+    """Tracker do mes corrente: receita_real vs receita_flat por dia +
+    linha de % desconto, com referencia do NE."""
+    if today is None:
+        today = date.today()
+    cur_first = today.replace(day=1)
+    if cur_first.month == 12:
+        next_first = date(cur_first.year + 1, 1, 1)
+    else:
+        next_first = date(cur_first.year, cur_first.month + 1, 1)
+    days_in_month = (next_first - cur_first).days
+    all_days = [cur_first + timedelta(days=i) for i in range(days_in_month)]
+
+    cur = diario_m[(diario_m["dia"] >= cur_first) & (diario_m["dia"] < next_first)].copy()
+    cur = (cur.set_index("dia").reindex(all_days).reset_index()
+              .rename(columns={"index": "dia"}))
+    fut = cur["dia"] > today
+    cur.loc[fut, ["receita_real", "receita_flat", "desconto_pct"]] = None
+
+    x = [d.strftime("%d") for d in cur["dia"]]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=x, y=cur["receita_flat"], name="Receita flat (R$)",
+        marker=dict(color=EL["muted"], opacity=0.65, line=dict(width=0)),
+        hovertemplate="<b>Dia %{x}</b><br>Flat: R$ %{y:,.0f}<extra></extra>"))
+    fig.add_trace(go.Bar(x=x, y=cur["receita_real"], name="Receita real (R$)",
+        marker=dict(color=EL["ink_2"], line=dict(width=0)),
+        hovertemplate="<b>Dia %{x}</b><br>Real: R$ %{y:,.0f}<extra></extra>"))
+    fig.add_trace(go.Scatter(x=x, y=cur["desconto_pct"], name="% desconto",
+        mode="lines+markers", yaxis="y2",
+        line=dict(color=EL["accent_today"], width=2.5),
+        marker=dict(size=8, color=EL["accent_today"],
+                     line=dict(color=EL["panel"], width=1.5)),
+        hovertemplate="<b>Dia %{x}</b><br>Desc.: %{y:.2f}%<extra></extra>"))
+    if ref_pct_ne is not None:
+        fig.add_hline(y=ref_pct_ne, yref="y2",
+            line=dict(color=EL["neutral"], width=1.2, dash="dot"),
+            annotation_text=f"  benchmark NE: {ref_pct_ne:.1f}%",
+            annotation_position="top right",
+            annotation=dict(font=dict(family="'IBM Plex Mono',monospace",
+                                       size=10, color=EL["neutral"])))
+    lay = dict(LAY); lay.update(
+        title=ed_title(f"Mauriti — {cur_first.strftime('%B/%Y').lower()}  ·  "
+                        "receita real vs receita flat", 20),
+        barmode="group",
+        xaxis=dict(title=f"dia (1 a {days_in_month})", gridcolor=EL["border"]),
+        yaxis=dict(title="R$ / dia", gridcolor=EL["border"]),
+        yaxis2=dict(title="% desconto modulacao", overlaying="y", side="right",
+                     showgrid=False, color=EL["accent_today"], ticksuffix="%"),
+        hovermode="x unified", height=460, bargap=0.25, bargroupgap=0.05,
+    )
+    fig.update_layout(**lay); return fig
+
+
+def g_mod_perfil_horario(perfil_m: pd.DataFrame):
+    """Perfil horario tipico: PLD R$/MWh + Geracao Mauriti MW. Mostra
+    o vale do PLD coincidindo com pico solar."""
+    if perfil_m.empty:
+        return go.Figure(layout=dict(LAY,
+            title=ed_title("Perfil horario tipico", 20)))
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=perfil_m["hora_dia"], y=perfil_m["pld_avg"],
+        name="PLD medio (R$/MWh)", mode="lines+markers",
+        line=dict(color="#5b6b7d", width=2.5),
+        marker=dict(size=7, color="#5b6b7d"),
+        hovertemplate="<b>%{x}h</b><br>PLD: R$ %{y:,.1f}/MWh<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=perfil_m["hora_dia"], y=perfil_m["gen_avg"],
+        name="Geracao Mauriti (MWh/h)", mode="lines+markers",
+        line=dict(color=EL["accent"], width=2.5), yaxis="y2",
+        marker=dict(size=7, color=EL["accent"]),
+        fill="tozeroy", fillcolor="rgba(168,68,47,0.10)",
+        hovertemplate="<b>%{x}h</b><br>Gen: %{y:,.1f} MWh<extra></extra>",
+    ))
+    lay = dict(LAY); lay.update(
+        title=ed_title("Por que perdemos receita: perfil horario tipico", 20),
+        xaxis=dict(title="Hora do dia (0-23)", dtick=2,
+                    gridcolor=EL["border"]),
+        yaxis=dict(title="PLD medio (R$/MWh)", gridcolor=EL["border"],
+                    color="#5b6b7d"),
+        yaxis2=dict(title="Geracao media Mauriti (MWh/h)", overlaying="y",
+                     side="right", showgrid=False, color=EL["accent"]),
+        hovermode="x unified", height=420,
+        legend=dict(orientation="h", y=-0.18,
+                     font=dict(family="'IBM Plex Mono',monospace", size=11)),
+    )
+    fig.update_layout(**lay); return fig
+
+
+def g_mod_historico_mensal(diario_m: pd.DataFrame, diario_ne: pd.DataFrame):
+    """Historico mensal % desconto: Mauriti vs benchmark NE."""
+    def por_mes(d):
+        if d.empty: return pd.DataFrame()
+        d = d.copy(); d["mes"] = pd.to_datetime(d["dia"]).dt.to_period("M").astype(str)
+        m = d.groupby("mes").agg(
+            rr=("receita_real", "sum"),
+            rf=("receita_flat", "sum"),
+        ).reset_index()
+        m["pct"] = (100 * (m["rr"] - m["rf"]) / m["rf"].replace(0, np.nan))
+        return m
+
+    m_m = por_mes(diario_m)
+    m_n = por_mes(diario_ne)
+    fig = go.Figure()
+    if not m_m.empty:
+        fig.add_trace(go.Bar(
+            x=m_m["mes"], y=m_m["pct"], name="Mauriti",
+            marker=dict(color=EL["accent"]),
+            hovertemplate="<b>Mauriti %{x}</b><br>Desc.: %{y:.2f}%<extra></extra>",
+        ))
+    if not m_n.empty:
+        fig.add_trace(go.Bar(
+            x=m_n["mes"], y=m_n["pct"], name="Frota NE solar",
+            marker=dict(color=EL["neutral"]),
+            hovertemplate="<b>NE %{x}</b><br>Desc.: %{y:.2f}%<extra></extra>",
+        ))
+    lay = dict(LAY); lay.update(
+        title=ed_title("% desconto modulacao por mes — "
+                        "Mauriti vs benchmark NE", 20),
+        barmode="group",
+        xaxis=dict(title="", gridcolor=EL["border"]),
+        yaxis=dict(title="% desconto modulacao", gridcolor=EL["border"],
+                    ticksuffix="%"),
+        hovermode="x unified", height=400,
+    )
+    fig.update_layout(**lay); return fig
+
+
+def g_mod_top_dias(diario_m: pd.DataFrame, n: int = 10):
+    """Top N dias com maior desconto absoluto em R$."""
+    if diario_m.empty:
+        return go.Figure(layout=dict(LAY,
+            title=ed_title("Top dias", 20)))
+    top = (diario_m[diario_m["desconto_rs"] < 0]
+              .nsmallest(n, "desconto_rs")
+              .sort_values("desconto_rs"))  # mais negativo no topo
+    if top.empty:
+        return go.Figure(layout=dict(LAY,
+            title=ed_title("Top dias - sem dias negativos", 20)))
+    labels = [d.strftime("%d/%m/%Y") for d in top["dia"]]
+    fig = go.Figure(go.Bar(
+        y=labels, x=top["desconto_rs"].abs(), orientation="h",
+        marker=dict(color=EL["accent"]),
+        text=[f"R$ {v:,.0f}   ·   {p:.2f}%   ·   PLD medio R$ {pld:,.0f}"
+              for v, p, pld in zip(top["desconto_rs"].abs(),
+                                    top["desconto_pct"],
+                                    top["pld_avg"])],
+        textposition="outside",
+        textfont=dict(color=EL["ink_2"], size=10,
+                      family="'IBM Plex Mono',monospace"),
+        hovertemplate="<b>%{y}</b><br>Perdido: R$ %{x:,.0f}<extra></extra>",
+    ))
+    lay = dict(LAY); lay.update(
+        title=ed_title(f"Top {n} dias com maior desconto absoluto", 20),
+        xaxis=dict(title="R$ perdidos no dia", gridcolor=EL["border"]),
+        yaxis=dict(autorange="reversed", gridcolor=EL["border"]),
+        height=max(280, 40 * len(top) + 100),
+        margin=dict(l=110, r=280, t=60, b=50),
+        showlegend=False,
+    )
+    fig.update_layout(**lay); return fig
+
+
 def g_heatmap_horario(df_mauriti):
     df = df_mauriti.copy()
     df["dia"] = df["din_instante"].dt.date
@@ -819,12 +1116,15 @@ def _gera_insights_mauriti(df: pd.DataFrame, met: dict) -> str:
     cortes = df[df["curtailment_mw"] > 0.01]
     if cortes.empty:
         return "Nao houve eventos relevantes de corte no periodo."
-    razao_top = cortes.groupby("cod_razaorestricao")["curtailment_mwh"].sum().idxmax()
-    pct_top = (cortes[cortes["cod_razaorestricao"] == razao_top]["curtailment_mwh"]
-                .sum() / cortes["curtailment_mwh"].sum() * 100)
-    origem_top = cortes.groupby("cod_origemrestricao")["curtailment_mwh"].sum().idxmax()
+    razao_grp = cortes.groupby("cod_razaorestricao")["curtailment_mwh"].sum()
+    if razao_grp.empty or razao_grp.sum() <= 0:
+        return "Nao foi possivel atribuir razao aos cortes do periodo."
+    razao_top = razao_grp.idxmax()
+    pct_top = (razao_grp[razao_top] / razao_grp.sum() * 100)
+    origem_grp = cortes.groupby("cod_origemrestricao")["curtailment_mwh"].sum()
+    origem_top = origem_grp.idxmax() if not origem_grp.empty else "—"
     horas = cortes.groupby(cortes["din_instante"].dt.hour)["curtailment_mwh"].sum()
-    hora_pico = int(horas.idxmax())
+    hora_pico = int(horas.idxmax()) if not horas.empty else 12
     return (
         f"A razao dominante do corte foi <strong>{razao_top} - "
         f"{RAZAO_LABEL.get(razao_top, razao_top)}</strong>, respondendo por "
@@ -868,7 +1168,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <html lang="pt-br">
 <head>
 <meta charset="utf-8">
-<title>Mauriti — Estudo de Curtailment</title>
+<title>Mauriti — Estudo de Curtailment & Modulação</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -888,34 +1188,49 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   -webkit-font-smoothing:antialiased; line-height:1.5}
 .wrap{max-width:1100px;margin:0 auto;padding:80px 32px 96px}
 .masthead{display:flex;align-items:center;justify-content:space-between;
-  border-bottom:1px solid var(--ink);padding-bottom:16px;margin-bottom:64px;
+  border-bottom:1px solid var(--ink);padding-bottom:16px;margin-bottom:32px;
   font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--ink-2);letter-spacing:0.18em;text-transform:uppercase}
 .masthead .vol{font-weight:600}
-.hero{margin-bottom:80px}
+
+/* ====== TABS ====== */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--rule);
+  margin-bottom:48px;}
+.tab{background:none;border:none;cursor:pointer;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:500;
+  color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;
+  padding:14px 24px;margin-right:6px;
+  border-bottom:2px solid transparent;
+  transition:color 0.15s, border-color 0.15s}
+.tab:hover{color:var(--ink-2)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent);
+  font-weight:600}
+
+.hero{margin-bottom:60px}
 .hero .kicker{font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--accent);letter-spacing:0.25em;text-transform:uppercase;
   margin-bottom:18px}
 .hero h1{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:clamp(44px,8vw,86px);line-height:0.96;
-  letter-spacing:-0.02em;margin:0 0 28px;font-variation-settings:"opsz" 144}
+  font-size:clamp(40px,7vw,72px);line-height:0.98;
+  letter-spacing:-0.02em;margin:0 0 24px;font-variation-settings:"opsz" 144}
 .hero h1 em{font-style:italic;font-weight:400;color:var(--accent)}
-.hero .lede{font-family:'Fraunces',Georgia,serif;font-weight:400;font-size:22px;
+.hero .lede{font-family:'Fraunces',Georgia,serif;font-weight:400;font-size:20px;
   line-height:1.45;color:var(--ink-2);max-width:720px;
   font-variation-settings:"opsz" 36}
 .hero .lede strong{color:var(--ink);font-weight:500}
-.hero .byline{margin-top:36px;font-family:'IBM Plex Mono',monospace;
+.hero .byline{margin-top:32px;font-family:'IBM Plex Mono',monospace;
   font-size:11px;color:var(--muted);letter-spacing:0.1em;
   text-transform:uppercase;line-height:1.8}
 .hero .byline span{color:var(--ink)}
-.tracker{margin:60px 0 80px;padding:32px 36px;background:var(--bg-alt);
+
+.tracker{margin:48px 0 64px;padding:32px 36px;background:var(--bg-alt);
   border:1px solid var(--rule);border-radius:2px;position:relative}
 .tracker .liveflag{position:absolute;top:-12px;left:32px;
   background:var(--accent-today);color:#fff;
   font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;
   letter-spacing:0.2em;padding:5px 10px;text-transform:uppercase}
 .tracker h2{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:30px;line-height:1.1;letter-spacing:-0.01em;margin:0 0 6px}
+  font-size:28px;line-height:1.1;letter-spacing:-0.01em;margin:0 0 6px}
 .tracker .when{font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;
   margin-bottom:24px}
@@ -935,15 +1250,15 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .t-stat .delta.up{color:var(--accent-today);font-weight:500}
 .t-stat .delta.down{color:var(--ok);font-weight:500}
 .bignum{display:grid;grid-template-columns:1fr 1.4fr;gap:64px;
-  align-items:end;margin:80px 0 60px;padding-top:40px;
+  align-items:end;margin:64px 0 48px;padding-top:40px;
   border-top:3px double var(--rule)}
 .bignum .figure{font-family:'Fraunces',Georgia,serif;font-weight:300;
-  font-size:clamp(96px,18vw,180px);line-height:0.9;letter-spacing:-0.04em;
+  font-size:clamp(80px,16vw,160px);line-height:0.9;letter-spacing:-0.04em;
   color:var(--accent);font-variation-settings:"opsz" 144}
 .bignum .figure span{font-size:0.32em;color:var(--ink);font-weight:500;
   margin-left:14px;letter-spacing:0;display:inline-block}
 .bignum .copy h2{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:32px;line-height:1.15;letter-spacing:-0.01em;margin:0 0 16px}
+  font-size:28px;line-height:1.15;letter-spacing:-0.01em;margin:0 0 16px}
 .bignum .copy p{font-size:15px;line-height:1.65;color:var(--ink-2);
   margin:0 0 8px;max-width:520px}
 @media (max-width:780px){.bignum{grid-template-columns:1fr}}
@@ -954,44 +1269,52 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   color:var(--muted);text-transform:uppercase;letter-spacing:0.18em;
   margin-bottom:10px}
 .stat .val{font-family:'Fraunces',Georgia,serif;font-weight:400;
-  font-size:38px;line-height:1;letter-spacing:-0.02em;color:var(--ink);
+  font-size:34px;line-height:1;letter-spacing:-0.02em;color:var(--ink);
   font-variation-settings:"opsz" 72}
-.stat .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:14px;
+.stat .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
   color:var(--muted);font-weight:400;margin-left:4px}
 .stat .delta{font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--muted);margin-top:8px;letter-spacing:0.05em}
 .stat.alt .val{color:var(--accent)}
-.section-head{margin:80px 0 32px;padding-bottom:14px;
+.section-head{margin:64px 0 28px;padding-bottom:14px;
   border-bottom:1px solid var(--ink);
   display:flex;align-items:baseline;gap:18px}
 .section-head .num{font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.2em}
 .section-head h3{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:28px;line-height:1.1;letter-spacing:-0.01em;margin:0;flex:1;
+  font-size:26px;line-height:1.1;letter-spacing:-0.01em;margin:0;flex:1;
   font-variation-settings:"opsz" 36}
 .section-head .tag{font-family:'IBM Plex Mono',monospace;font-size:10px;
   color:var(--muted);text-transform:uppercase;letter-spacing:0.15em}
-.section-desc{font-family:'Fraunces',Georgia,serif;font-size:18px;
-  line-height:1.55;color:var(--ink-2);max-width:680px;margin:0 0 32px;
+.section-desc{font-family:'Fraunces',Georgia,serif;font-size:17px;
+  line-height:1.55;color:var(--ink-2);max-width:680px;margin:0 0 28px;
   font-variation-settings:"opsz" 28}
-.pullquote{margin:48px 0;padding:32px 40px;background:var(--bg-alt);
+.pullquote{margin:40px 0;padding:28px 36px;background:var(--bg-alt);
   border-left:3px solid var(--accent);
-  font-family:'Fraunces',Georgia,serif;font-size:21px;line-height:1.5;
+  font-family:'Fraunces',Georgia,serif;font-size:19px;line-height:1.5;
   color:var(--ink);font-variation-settings:"opsz" 36}
 .pullquote strong{color:var(--accent);font-weight:500;font-style:italic}
 .pullquote cite{display:block;margin-top:14px;font-family:'IBM Plex Mono',monospace;
   font-size:10px;color:var(--muted);font-style:normal;
   letter-spacing:0.15em;text-transform:uppercase}
+.disclaimer{margin:32px 0;padding:20px 24px;background:transparent;
+  border:1px dashed var(--rule);border-radius:2px;
+  font-family:'IBM Plex Sans',sans-serif;font-size:13px;line-height:1.6;
+  color:var(--muted)}
+.disclaimer strong{color:var(--ink-2);font-weight:500}
 .chart{background:var(--panel);border:1px solid var(--border);
   border-radius:2px;margin:24px 0;padding:8px 4px 4px}
 .chart-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:24px 0}
 @media (max-width:880px){.chart-row{grid-template-columns:1fr}}
-footer{margin-top:120px;padding-top:32px;border-top:1px solid var(--ink);
+footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
   font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
   line-height:1.8;letter-spacing:0.04em}
 footer p{margin:0 0 10px;max-width:680px}
 footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
   font-size:13px;color:var(--ink-2);margin-top:24px}
+
+.tab-pane{display:none}
+.tab-pane.active{display:block}
 </style>
 </head>
 <body>
@@ -999,171 +1322,356 @@ footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
 <div class="wrap">
 
   <div class="masthead">
-    <div class="vol">Constrained-off Report — N&deg; 01</div>
+    <div class="vol">Mauriti Report — N&deg; 01</div>
     <div>{{ periodo }} &nbsp;&middot;&nbsp; atualizado {{ gerado_em }}</div>
   </div>
 
-  <div class="hero">
-    <div class="kicker">PowerChina &middot; Complexo fotovoltaico Mauriti, Cear&aacute;</div>
-    <h1>Quanto custou ao Mauriti<br>
-        cada megawatt-hora <em>cortado</em>.</h1>
-    <p class="lede">
-      Estudo de constrained-off do <strong>Complexo Fotovoltaico Mauriti</strong>
-      no per&iacute;odo de {{ periodo }}, com benchmark contra usinas e&oacute;licas
-      e fotovoltaicas do Cear&aacute;, quebra por raz&atilde;o do corte
-      (REL/CNF/ENE/PAR) e estimativa de receita perdida a PLD hor&aacute;rio.
-    </p>
-    <div class="byline">
-      Submercado <span>{{ submercado }}</span> &nbsp;&middot;&nbsp;
-      UFVs Mauriti <span>{{ met_m.n_usinas }}</span> &nbsp;&middot;&nbsp;
-      Benchmark <span>{{ n_grupos }} grupos</span> &nbsp;&middot;&nbsp;
-      Apurado em <span>{{ gerado_em }}</span>
-    </div>
+  <!-- TABS -->
+  <div class="tabs">
+    <button class="tab active" data-tab="curt">Curtailment</button>
+    <button class="tab" data-tab="mod">Efeito Modula&ccedil;&atilde;o</button>
   </div>
 
-  <!-- TRACKER MES CORRENTE -->
-  <div class="tracker">
-    <div class="liveflag">&bull; Atualizado semanalmente</div>
-    <h2>Acompanhamento — m&ecirc;s corrente</h2>
-    <div class="when">Per&iacute;odo: {{ tracker.cur_first }} &middot;
-      {{ tracker.dias_decorridos }} de {{ tracker.days_in_month }} dias decorridos</div>
+  <!-- ============================================================ -->
+  <!-- TAB: CURTAILMENT                                              -->
+  <!-- ============================================================ -->
+  <div class="tab-pane active" data-tab="curt">
 
-    <div class="tracker-stats">
-      <div class="t-stat">
-        <div class="lbl">Esperada (m&ecirc;s)</div>
-        <div class="val">{{ "%.1f"|format(tracker.esperada_mes) }}<span class="unit">MWh</span></div>
-        <div class="delta">{{ tracker.dias_decorridos }} dias decorridos</div>
+    <div class="hero">
+      <div class="kicker">PowerChina &middot; Complexo fotovoltaico Mauriti, Cear&aacute;</div>
+      <h1>Quanto custou ao Mauriti<br>
+          cada megawatt-hora <em>cortado</em>.</h1>
+      <p class="lede">
+        Estudo de constrained-off do <strong>Complexo Fotovoltaico Mauriti</strong>
+        no per&iacute;odo de {{ periodo }}, com benchmark contra usinas e&oacute;licas
+        e fotovoltaicas do Cear&aacute;, quebra por raz&atilde;o do corte
+        (REL/CNF/ENE/PAR) e estimativa de receita perdida a PLD hor&aacute;rio.
+      </p>
+      <div class="byline">
+        Submercado <span>{{ submercado }}</span> &nbsp;&middot;&nbsp;
+        UFVs Mauriti <span>{{ met_m.n_usinas }}</span> &nbsp;&middot;&nbsp;
+        Benchmark <span>{{ n_grupos }} grupos</span> &nbsp;&middot;&nbsp;
+        Apurado em <span>{{ gerado_em }}</span>
       </div>
-      <div class="t-stat">
-        <div class="lbl">Cortada (m&ecirc;s)</div>
-        <div class="val">{{ "%.1f"|format(tracker.cortada_mes) }}<span class="unit">MWh</span></div>
-        <div class="delta">de {{ "%.1f"|format(tracker.esperada_mes) }} esperados</div>
-      </div>
-      <div class="t-stat alt">
-        <div class="lbl">CF% do m&ecirc;s</div>
-        <div class="val">{{ "%.2f"|format(tracker.cf_mes) }}<span class="unit">%</span></div>
-        {% if tracker.delta_cf is not none %}
-        <div class="delta {% if tracker.delta_cf > 0 %}up{% else %}down{% endif %}">
-          {% if tracker.delta_cf > 0 %}+{% endif %}{{ "%.2f"|format(tracker.delta_cf) }} pp vs trim.
+    </div>
+
+    <div class="tracker">
+      <div class="liveflag">&bull; Atualizado semanalmente</div>
+      <h2>Acompanhamento — m&ecirc;s corrente</h2>
+      <div class="when">Per&iacute;odo: {{ tracker.cur_first }} &middot;
+        {{ tracker.dias_decorridos }} de {{ tracker.days_in_month }} dias decorridos</div>
+
+      <div class="tracker-stats">
+        <div class="t-stat">
+          <div class="lbl">Esperada (m&ecirc;s)</div>
+          <div class="val">{{ "%.1f"|format(tracker.esperada_mes) }}<span class="unit">MWh</span></div>
+          <div class="delta">{{ tracker.dias_decorridos }} dias decorridos</div>
         </div>
+        <div class="t-stat">
+          <div class="lbl">Cortada (m&ecirc;s)</div>
+          <div class="val">{{ "%.1f"|format(tracker.cortada_mes) }}<span class="unit">MWh</span></div>
+          <div class="delta">de {{ "%.1f"|format(tracker.esperada_mes) }} esperados</div>
+        </div>
+        <div class="t-stat alt">
+          <div class="lbl">CF% do m&ecirc;s</div>
+          <div class="val">{{ "%.2f"|format(tracker.cf_mes) }}<span class="unit">%</span></div>
+          {% if tracker.delta_cf is not none %}
+          <div class="delta {% if tracker.delta_cf > 0 %}up{% else %}down{% endif %}">
+            {% if tracker.delta_cf > 0 %}+{% endif %}{{ "%.2f"|format(tracker.delta_cf) }} pp vs trim.
+          </div>
+          {% endif %}
+        </div>
+        <div class="t-stat">
+          <div class="lbl">CF medio trim.</div>
+          <div class="val">{% if tracker.ref_cf is not none %}{{ "%.2f"|format(tracker.ref_cf) }}{% else %}—{% endif %}<span class="unit">%</span></div>
+          <div class="delta">refer&ecirc;ncia 90 dias</div>
+        </div>
+        <div class="t-stat">
+          <div class="lbl">Pior dia (CF%)</div>
+          <div class="val">{{ "%.1f"|format(tracker.pior_cf) }}<span class="unit">%</span></div>
+          <div class="delta">dia {{ tracker.pior_dia }}</div>
+        </div>
+      </div>
+
+      <div style="background:transparent;padding:0">
+        <div id="tracker" style="height:460px"></div>
+      </div>
+    </div>
+
+    <div class="bignum">
+      <div class="figure">
+        {{ "%.1f"|format(met_m.total_curt_mwh/1000) }}<span>GWh</span>
+      </div>
+      <div class="copy">
+        <h2>Energia n&atilde;o entregue por restri&ccedil;&atilde;o de opera&ccedil;&atilde;o</h2>
+        <p>Equivale a <strong>R$ {{ "%.1f"|format(met_m.receita_perdida/1e6) }}
+          milh&otilde;es</strong> em receita perdida estimada a PLD hor&aacute;rio
+          do submercado {{ submercado }}, com curtailment factor de
+          <strong>{{ "%.2f"|format(met_m.curtailment_factor) }}%</strong>.</p>
+        <p>Desse total, <strong>{{ "%.1f"|format(met_m.pct_ressarcivel) }}%
+          potencialmente ressarciveis</strong> sob a REN ANEEL 1.030/2022
+          (raz&otilde;es REL e CNF).</p>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat alt">
+        <div class="lbl">Curtailment Factor</div>
+        <div class="val">{{ "%.2f"|format(met_m.curtailment_factor) }}<span class="unit">%</span></div>
+        <div class="delta">cortado / refer&ecirc;ncia</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">Receita perdida</div>
+        <div class="val">R$ {{ "%.1f"|format(met_m.receita_perdida/1e6) }}<span class="unit">M</span></div>
+        <div class="delta">a PLD hor&aacute;rio {{ submercado }}</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">Pot. ressarciv&eacute;l</div>
+        <div class="val">R$ {{ "%.1f"|format(met_m.receita_ressarcivel/1e6) }}<span class="unit">M</span></div>
+        <div class="delta">REL + CNF</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">PLD durante corte</div>
+        <div class="val">{{ "%.0f"|format(met_m.pld_durante_corte) }}<span class="unit">R$/MWh</span></div>
+        <div class="delta">vs m&eacute;dio R$ {{ "%.0f"|format(met_m.pld_geral) }}/MWh</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">vs Benchmark CE</div>
+        {% set delta = met_m.curtailment_factor - met_b.curtailment_factor %}
+        <div class="val">{% if delta > 0 %}+{% endif %}{{ "%.2f"|format(delta) }}<span class="unit">pp</span></div>
+        <div class="delta">delta de CF</div>
+      </div>
+    </div>
+
+    <div class="section-head">
+      <span class="num">I.</span><h3>O ritmo dos cortes</h3>
+      <span class="tag">SERIE TEMPORAL</span>
+    </div>
+    <p class="section-desc">
+      A &aacute;rea entre a refer&ecirc;ncia (linha pontilhada verde) e a gera&ccedil;&atilde;o
+      realizada representa a energia que poderia ter sido produzida e n&atilde;o foi.
+    </p>
+    <div class="chart"><div id="serie" style="height:440px"></div></div>
+
+    <div class="section-head">
+      <span class="num">II.</span><h3>Por que se corta</h3>
+      <span class="tag">RAZ&Otilde;ES DA RESTRI&Ccedil;&Atilde;O</span>
+    </div>
+    <p class="section-desc">
+      Indisponibilidade externa (REL) e Confiabilidade (CNF) s&atilde;o tipicamente
+      trat&aacute;veis sob a REN 1.030/2022; raz&atilde;o energ&eacute;tica (ENE) raramente o &eacute;.
+    </p>
+    <div class="chart-row">
+      <div class="chart"><div id="donut_razao" style="height:380px"></div></div>
+      <div class="chart"><div id="razoes_mes" style="height:380px"></div></div>
+    </div>
+
+    {% if insights_m %}
+    <div class="pullquote">{{ insights_m|safe }}<cite>Leitura autom&aacute;tica</cite></div>
+    {% endif %}
+
+    <div class="section-head">
+      <span class="num">III.</span><h3>Mauriti vs ativos do CE</h3>
+      <span class="tag">BENCHMARK FIXO</span>
+    </div>
+    <p class="section-desc">
+      Compara&ccedil;&atilde;o direta com {{ n_grupos }} grupos: <strong>{{ grupos_str }}</strong>.
+    </p>
+    <div class="chart"><div id="comp_cf" style="height:480px"></div></div>
+
+    {% if insights_c %}
+    <div class="pullquote">{{ insights_c|safe }}<cite>An&aacute;lise comparativa</cite></div>
+    {% endif %}
+
+    <div class="section-head">
+      <span class="num">IV.</span><h3>Onde, no dia, se corta</h3>
+      <span class="tag">PADR&Atilde;O HOR&Aacute;RIO</span>
+    </div>
+    <p class="section-desc">
+      Heatmap do CF% por hora do dia. Cortes em 11h&ndash;14h indicam restri&ccedil;&atilde;o
+      sist&ecirc;mica do NE; pulverizados sugerem limita&ccedil;&atilde;o local.
+    </p>
+    <div class="chart"><div id="heatmap" style="height:440px"></div></div>
+
+  </div><!-- /tab curt -->
+
+
+  <!-- ============================================================ -->
+  <!-- TAB: MODULACAO                                                -->
+  <!-- ============================================================ -->
+  <div class="tab-pane" data-tab="mod">
+
+    <div class="hero">
+      <div class="kicker">PowerChina &middot; Mauriti &middot; Valor de perfil</div>
+      <h1>Quanto custou <em>quando</em><br>geramos cada MWh.</h1>
+      <p class="lede">
+        Compara&ccedil;&atilde;o entre a receita real do Mauriti
+        (Σ MWh<sub>hora</sub> × PLD<sub>hora</sub>) e a receita "flat"
+        que se obteria se a gera&ccedil;&atilde;o fosse plana ao longo do dia.
+        A diferen&ccedil;a &eacute; o <strong>desconto de modula&ccedil;&atilde;o</strong> &mdash;
+        custo do timing, n&atilde;o do volume.
+      </p>
+      <div class="byline">
+        Submercado <span>{{ submercado }}</span> &nbsp;&middot;&nbsp;
+        Benchmark <span>frota UFV NE</span> &nbsp;&middot;&nbsp;
+        Per&iacute;odo <span>{{ periodo }}</span>
+      </div>
+    </div>
+
+    {% if not met_mod_m.vazio %}
+    <div class="tracker">
+      <div class="liveflag">&bull; Atualizado semanalmente</div>
+      <h2>Acompanhamento — m&ecirc;s corrente</h2>
+      <div class="when">Receita real vs receita flat por dia</div>
+
+      <div class="tracker-stats">
+        <div class="t-stat alt">
+          <div class="lbl">Desconto m&ecirc;s</div>
+          {% if mod_tracker.cur_pct is not none %}
+          <div class="val">{{ "%.2f"|format(mod_tracker.cur_pct) }}<span class="unit">%</span></div>
+          {% else %}<div class="val">—</div>{% endif %}
+          <div class="delta">no m&ecirc;s corrente</div>
+        </div>
+        <div class="t-stat">
+          <div class="lbl">Desconto m&ecirc;s (R$)</div>
+          {% if mod_tracker.cur_rs is not none %}
+          <div class="val">{{ "%.0f"|format(mod_tracker.cur_rs/1000) }}<span class="unit">k R$</span></div>
+          {% else %}<div class="val">—</div>{% endif %}
+          <div class="delta">receita potencial perdida</div>
+        </div>
+        <div class="t-stat">
+          <div class="lbl">PLD m&eacute;dio m&ecirc;s</div>
+          {% if mod_tracker.cur_pld is not none %}
+          <div class="val">{{ "%.0f"|format(mod_tracker.cur_pld) }}<span class="unit">R$/MWh</span></div>
+          {% else %}<div class="val">—</div>{% endif %}
+          <div class="delta">submercado {{ submercado }}</div>
+        </div>
+        <div class="t-stat">
+          <div class="lbl">Benchmark NE</div>
+          {% if met_mod_ne.vazio %}<div class="val">—</div>
+          {% else %}
+          <div class="val">{{ "%.2f"|format(met_mod_ne.desconto_pct) }}<span class="unit">%</span></div>
+          {% endif %}
+          <div class="delta">frota UFV NE no per&iacute;odo</div>
+        </div>
+        <div class="t-stat">
+          <div class="lbl">vs benchmark</div>
+          {% if mod_tracker.delta_pp is not none %}
+          <div class="delta {% if mod_tracker.delta_pp < 0 %}up{% else %}down{% endif %}"
+                style="font-size:30px;font-family:Fraunces,Georgia,serif;
+                       letter-spacing:-0.01em;margin-top:0">
+            {% if mod_tracker.delta_pp > 0 %}+{% endif %}{{ "%.2f"|format(mod_tracker.delta_pp) }} pp
+          </div>
+          <div class="delta">{{ "Mauriti pior" if mod_tracker.delta_pp < 0 else "Mauriti melhor" }}</div>
+          {% else %}<div class="val">—</div>{% endif %}
+        </div>
+      </div>
+
+      <div style="background:transparent;padding:0">
+        <div id="mod_tracker" style="height:460px"></div>
+      </div>
+    </div>
+
+    <div class="bignum">
+      <div class="figure">
+        {{ "%.1f"|format((met_mod_m.desconto_rs|abs)/1e6) }}<span>R$ M</span>
+      </div>
+      <div class="copy">
+        <h2>Receita potencial perdida pela modula&ccedil;&atilde;o</h2>
+        <p>O Mauriti realizou
+          <strong>R$ {{ "%.1f"|format(met_mod_m.receita_real/1e6) }} M</strong>
+          quando, com gera&ccedil;&atilde;o &agrave; m&eacute;dia di&aacute;ria do PLD, teria realizado
+          <strong>R$ {{ "%.1f"|format(met_mod_m.receita_flat/1e6) }} M</strong>.</p>
+        <p>Isso &eacute; um desconto de
+          <strong>{{ "%.2f"|format(met_mod_m.desconto_pct) }}%</strong> da
+          receita flat &mdash; pre&ccedil;o efetivo de
+          <strong>R$ {{ "%.0f"|format(met_mod_m.preco_efetivo) }}/MWh</strong>
+          contra um PLD m&eacute;dio de
+          <strong>R$ {{ "%.0f"|format(met_mod_m.pld_medio) }}/MWh</strong>.</p>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat alt">
+        <div class="lbl">% Desconto Mauriti</div>
+        <div class="val">{{ "%.2f"|format(met_mod_m.desconto_pct) }}<span class="unit">%</span></div>
+        <div class="delta">receita_real / receita_flat - 1</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">% Desconto NE (frota)</div>
+        {% if met_mod_ne.vazio %}<div class="val">—</div>
+        {% else %}<div class="val">{{ "%.2f"|format(met_mod_ne.desconto_pct) }}<span class="unit">%</span></div>{% endif %}
+        <div class="delta">benchmark frota UFV NE</div>
+      </div>
+      <div class="stat">
+        <div class="lbl">vs Benchmark NE</div>
+        {% if met_mod_ne.vazio %}<div class="val">—</div>
+        {% else %}
+        {% set d = met_mod_m.desconto_pct - met_mod_ne.desconto_pct %}
+        <div class="val">{% if d > 0 %}+{% endif %}{{ "%.2f"|format(d) }}<span class="unit">pp</span></div>
         {% endif %}
+        <div class="delta">delta de % desconto</div>
       </div>
-      <div class="t-stat">
-        <div class="lbl">CF medio trim.</div>
-        <div class="val">{% if tracker.ref_cf is not none %}{{ "%.2f"|format(tracker.ref_cf) }}{% else %}—{% endif %}<span class="unit">%</span></div>
-        <div class="delta">refer&ecirc;ncia 90 dias</div>
+      <div class="stat">
+        <div class="lbl">Pre&ccedil;o efetivo</div>
+        <div class="val">R$ {{ "%.0f"|format(met_mod_m.preco_efetivo) }}<span class="unit">/MWh</span></div>
+        <div class="delta">receita_real / MWh</div>
       </div>
-      <div class="t-stat">
-        <div class="lbl">Pior dia (CF%)</div>
-        <div class="val">{{ "%.1f"|format(tracker.pior_cf) }}<span class="unit">%</span></div>
-        <div class="delta">dia {{ tracker.pior_dia }}</div>
+      <div class="stat">
+        <div class="lbl">PLD m&eacute;dio</div>
+        <div class="val">R$ {{ "%.0f"|format(met_mod_m.pld_medio) }}<span class="unit">/MWh</span></div>
+        <div class="delta">submercado {{ submercado }}</div>
       </div>
     </div>
 
-    <div style="background:transparent;padding:0">
-      <div id="tracker" style="height:460px"></div>
+    <div class="section-head">
+      <span class="num">I.</span><h3>Por que perdemos receita</h3>
+      <span class="tag">PERFIL HOR&Aacute;RIO T&Iacute;PICO</span>
     </div>
-  </div>
+    <p class="section-desc">
+      Dia tipico (m&eacute;dia de cada hora ao longo do per&iacute;odo). O pico de
+      gera&ccedil;&atilde;o solar coincide com o vale do PLD do submercado &mdash;
+      vendemos a maior parte do MWh quando ele vale menos.
+    </p>
+    <div class="chart"><div id="mod_perfil" style="height:420px"></div></div>
 
-  <div class="bignum">
-    <div class="figure">
-      {{ "%.1f"|format(met_m.total_curt_mwh/1000) }}<span>GWh</span>
+    <div class="section-head">
+      <span class="num">II.</span><h3>Mauriti vs frota NE solar</h3>
+      <span class="tag">HIST&Oacute;RICO MENSAL</span>
     </div>
-    <div class="copy">
-      <h2>Energia n&atilde;o entregue por restri&ccedil;&atilde;o de opera&ccedil;&atilde;o</h2>
-      <p>Equivale a <strong>R$ {{ "%.1f"|format(met_m.receita_perdida/1e6) }}
-        milh&otilde;es</strong> em receita perdida estimada a PLD hor&aacute;rio
-        do submercado {{ submercado }}, com curtailment factor de
-        <strong>{{ "%.2f"|format(met_m.curtailment_factor) }}%</strong> sobre a
-        gera&ccedil;&atilde;o de refer&ecirc;ncia.</p>
-      <p>Desse total, estima-se que <strong>{{ "%.1f"|format(met_m.pct_ressarcivel) }}%
-        sejam potencialmente ressarciveis</strong> sob a REN ANEEL 1.030/2022
-        (raz&otilde;es REL e CNF).</p>
+    <p class="section-desc">
+      Compara&ccedil;&atilde;o do % de desconto m&ecirc;s a m&ecirc;s. Per&iacute;odos secos
+      (PLD geralmente alto o dia todo) tendem a ter desconto menor; per&iacute;odos
+      de carga baixa (mais excedente solar no SIN) ampliam o efeito.
+    </p>
+    <div class="chart"><div id="mod_hist" style="height:400px"></div></div>
+
+    <div class="section-head">
+      <span class="num">III.</span><h3>Top dias mais doloridos</h3>
+      <span class="tag">RANKING POR R$</span>
     </div>
-  </div>
+    <p class="section-desc">
+      Os dias em que o desconto absoluto (em R$) foi maior. Geralmente
+      coincidem com PLD muito baixo no meio do dia
+      (excesso de oferta solar no SIN).
+    </p>
+    <div class="chart"><div id="mod_top" style="height:520px"></div></div>
 
-  <div class="stats">
-    <div class="stat alt">
-      <div class="lbl">Curtailment Factor</div>
-      <div class="val">{{ "%.2f"|format(met_m.curtailment_factor) }}<span class="unit">%</span></div>
-      <div class="delta">cortado / refer&ecirc;ncia</div>
+    <div class="disclaimer">
+      <p><strong>Importante:</strong> esta an&aacute;lise mostra o desconto
+      <em>te&oacute;rico</em> assumindo que toda a gera&ccedil;&atilde;o &eacute; liquidada no
+      PLD hor&aacute;rio. O impacto real na receita do PowerChina depende do
+      regime de comercializa&ccedil;&atilde;o de cada UFV: PPA fixo (R$/MWh) absorve
+      o efeito mas perde valor no spot; liquida&ccedil;&atilde;o no MCP captura o
+      impacto integral; produtos shape com a CCEE neutralizam o desconto.
+      Os n&uacute;meros aqui s&atilde;o <strong>indicador direcional</strong> do
+      pr&ecirc;mio que valeria a pena pagar por um hedge perfeito de modula&ccedil;&atilde;o.</p>
     </div>
-    <div class="stat">
-      <div class="lbl">Receita perdida</div>
-      <div class="val">R$ {{ "%.1f"|format(met_m.receita_perdida/1e6) }}<span class="unit">M</span></div>
-      <div class="delta">a PLD hor&aacute;rio {{ submercado }}</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">Pot. ressarciv&eacute;l</div>
-      <div class="val">R$ {{ "%.1f"|format(met_m.receita_ressarcivel/1e6) }}<span class="unit">M</span></div>
-      <div class="delta">REL + CNF</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">PLD durante corte</div>
-      <div class="val">{{ "%.0f"|format(met_m.pld_durante_corte) }}<span class="unit">R$/MWh</span></div>
-      <div class="delta">vs m&eacute;dio R$ {{ "%.0f"|format(met_m.pld_geral) }}/MWh</div>
-    </div>
-    <div class="stat">
-      <div class="lbl">vs Benchmark CE</div>
-      {% set delta = met_m.curtailment_factor - met_b.curtailment_factor %}
-      <div class="val">{% if delta > 0 %}+{% endif %}{{ "%.2f"|format(delta) }}<span class="unit">pp</span></div>
-      <div class="delta">delta de CF</div>
-    </div>
-  </div>
 
-  <div class="section-head">
-    <span class="num">I.</span><h3>O ritmo dos cortes</h3>
-    <span class="tag">SERIE TEMPORAL</span>
-  </div>
-  <p class="section-desc">
-    A &aacute;rea entre a refer&ecirc;ncia (linha pontilhada verde) e a gera&ccedil;&atilde;o
-    realizada representa a energia que poderia ter sido produzida e n&atilde;o foi.
-  </p>
-  <div class="chart"><div id="serie" style="height:440px"></div></div>
+    {% endif %}
 
-  <div class="section-head">
-    <span class="num">II.</span><h3>Por que se corta</h3>
-    <span class="tag">RAZ&Otilde;ES DA RESTRI&Ccedil;&Atilde;O</span>
-  </div>
-  <p class="section-desc">
-    Indisponibilidade externa (REL) e Confiabilidade (CNF) s&atilde;o tipicamente
-    trat&aacute;veis sob a REN 1.030/2022; raz&atilde;o energ&eacute;tica (ENE) raramente o &eacute;.
-  </p>
-  <div class="chart-row">
-    <div class="chart"><div id="donut_razao" style="height:380px"></div></div>
-    <div class="chart"><div id="razoes_mes" style="height:380px"></div></div>
-  </div>
+  </div><!-- /tab mod -->
 
-  {% if insights_m %}
-  <div class="pullquote">{{ insights_m|safe }}<cite>Leitura autom&aacute;tica</cite></div>
-  {% endif %}
-
-  <div class="section-head">
-    <span class="num">III.</span><h3>Mauriti vs ativos do CE</h3>
-    <span class="tag">BENCHMARK FIXO</span>
-  </div>
-  <p class="section-desc">
-    Compara&ccedil;&atilde;o direta com {{ n_grupos }} grupos de ativos no Cear&aacute;:
-    <strong>{{ grupos_str }}</strong>. Cada grupo agrega todas as usinas que
-    casarem com seu padr&atilde;o de nome.
-  </p>
-  <div class="chart"><div id="comp_cf" style="height:480px"></div></div>
-
-  {% if insights_c %}
-  <div class="pullquote">{{ insights_c|safe }}<cite>An&aacute;lise comparativa</cite></div>
-  {% endif %}
-
-  <div class="section-head">
-    <span class="num">IV.</span><h3>Onde, no dia, se corta</h3>
-    <span class="tag">PADR&Atilde;O HOR&Aacute;RIO</span>
-  </div>
-  <p class="section-desc">
-    Heatmap do CF% por hora do dia ao longo do per&iacute;odo. Cortes concentrados em
-    11h&ndash;14h indicam restri&ccedil;&atilde;o sist&ecirc;mica do submercado NE
-    (pico solar coincide com vale de demanda); cortes pulverizados sugerem
-    limita&ccedil;&atilde;o local da SE/LT que escoa o complexo.
-  </p>
-  <div class="chart"><div id="heatmap" style="height:440px"></div></div>
 
   <footer>
     <p><strong>Fontes</strong> Restri&ccedil;&atilde;o de Opera&ccedil;&atilde;o por Constrained-off
@@ -1171,11 +1679,12 @@ footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
       PLD hor&aacute;rio (CCEE).</p>
     <p><strong>Defini&ccedil;&otilde;es</strong> Curtailment = max(0,
       val_geracaoestimada &minus; val_geracaoverificada). Receita perdida =
-      curtailment_MWh &times; PLD_horario. CF = curtailment / esperada (%).</p>
-    <p><strong>Ressarcimento</strong> A estimativa de potencial ressarciv&eacute;l
-      considera apenas as raz&otilde;es REL e CNF sob a REN ANEEL 1.030/2022,
-      sujeita &agrave; modalidade da usina e aos termos do contrato.</p>
-    <p class="colofao">Mauriti — Estudo de Curtailment, gerado em
+      curtailment_MWh &times; PLD_horario. CF = curtailment / esperada (%).
+      Desconto modula&ccedil;&atilde;o = (Σ MWh<sub>h</sub> × PLD<sub>h</sub>) − (Σ MWh<sub>dia</sub> × PLD<sub>medio_dia</sub>).</p>
+    <p><strong>Benchmark NE</strong> O benchmark de modula&ccedil;&atilde;o agrega
+      todas as UFVs do submercado NE como uma frota &uacute;nica, ponderando pela
+      gera&ccedil;&atilde;o. Mostra o desconto que a frota NE coletivamente sofreu.</p>
+    <p class="colofao">Mauriti — Curtailment & Modula&ccedil;&atilde;o, gerado em
       {{ gerado_em }}.</p>
   </footer>
 
@@ -1183,6 +1692,8 @@ footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
 
 <script>
 const FIGS = {{ figs_json|safe }};
+
+// Renderiza todos os charts no load (mesmo os que estao em tab oculto)
 for (const [k, fig] of Object.entries(FIGS)) {
   if (document.getElementById(k)) {
     Plotly.newPlot(k, fig.data, fig.layout, {
@@ -1191,6 +1702,23 @@ for (const [k, fig] of Object.entries(FIGS)) {
     });
   }
 }
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.tab;
+    document.querySelectorAll('.tab').forEach(b =>
+      b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.tab-pane').forEach(p =>
+      p.classList.toggle('active', p.dataset.tab === target));
+    // Resize Plotly charts na aba que ficou visivel
+    setTimeout(() => {
+      document.querySelectorAll(`.tab-pane.active [id]`).forEach(div => {
+        if (window.Plotly && div._fullData) Plotly.Plots.resize(div);
+      });
+    }, 60);
+  });
+});
 </script>
 </body>
 </html>
@@ -1201,7 +1729,8 @@ for (const [k, fig] of Object.entries(FIGS)) {
 #  RENDER
 # =============================================================================
 
-def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld_sub: str,
+def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
+                ne_horario: pd.DataFrame, pld_sub: str,
                 periodo: str, output: Path, today: date) -> None:
     met_m = metricas(mauriti.df)
     bench_df = (pd.concat([g.df for g in grupos], ignore_index=True)
@@ -1224,6 +1753,40 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld_sub: str,
     else:
         pior_dia, pior_cf = "—", 0.0
 
+    # ========== MODULACAO ==========
+    print("\n[*] Calculando modulacao Mauriti + benchmark NE...")
+    hor_m = agregar_horario_mauriti(mauriti.df)
+    diario_m = calcular_modulacao(hor_m, pld)
+    perfil_m = perfil_horario(hor_m, pld)
+    met_mod_m = metricas_modulacao(diario_m)
+
+    if not ne_horario.empty:
+        ne_for_calc = ne_horario.rename(columns={"mwh_total_ne": "mwh"})
+        diario_ne = calcular_modulacao(ne_for_calc[["hora", "mwh"]], pld)
+        met_mod_ne = metricas_modulacao(diario_ne)
+    else:
+        diario_ne = pd.DataFrame()
+        met_mod_ne = {"vazio": True}
+
+    # Tracker stats da modulacao (mes corrente)
+    cur_first = today.replace(day=1)
+    if not diario_m.empty:
+        cur_m = diario_m[diario_m["dia"] >= cur_first]
+        if not cur_m.empty:
+            cur_pct = float((100 * (cur_m["receita_real"].sum()
+                                     - cur_m["receita_flat"].sum()) /
+                              max(cur_m["receita_flat"].sum(), 1e-9)))
+            cur_rs = float(cur_m["receita_real"].sum() -
+                            cur_m["receita_flat"].sum())
+            cur_pld = float(cur_m["pld_avg"].mean())
+        else:
+            cur_pct, cur_rs, cur_pld = None, None, None
+    else:
+        cur_pct, cur_rs, cur_pld = None, None, None
+    delta_pp = ((cur_pct - met_mod_ne["desconto_pct"])
+                if cur_pct is not None and not met_mod_ne.get("vazio") else None)
+
+    # ========== FIGURAS ==========
     figs: dict[str, Any] = {"tracker": json.loads(pio.to_json(fig_tracker))}
     if not met_m.get("vazio"):
         figs["serie"]       = json.loads(pio.to_json(g_serie(mauriti.df,
@@ -1234,6 +1797,18 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld_sub: str,
             "Razoes por mes")))
         figs["heatmap"]     = json.loads(pio.to_json(g_heatmap_horario(mauriti.df)))
     figs["comp_cf"] = json.loads(pio.to_json(g_comp_cf(mauriti.df, grupos)))
+
+    # Charts modulacao
+    if not met_mod_m.get("vazio"):
+        ref_pct_ne = met_mod_ne.get("desconto_pct") if not met_mod_ne.get("vazio") else None
+        figs["mod_tracker"] = json.loads(pio.to_json(
+            g_mod_tracker(diario_m, ref_pct_ne, today)))
+        figs["mod_perfil"]  = json.loads(pio.to_json(
+            g_mod_perfil_horario(perfil_m)))
+        figs["mod_hist"]    = json.loads(pio.to_json(
+            g_mod_historico_mensal(diario_m, diario_ne)))
+        figs["mod_top"]     = json.loads(pio.to_json(
+            g_mod_top_dias(diario_m, n=10)))
 
     grupos_str = ", ".join([g.label for g in grupos]) if grupos else "—"
     html = Template(HTML_TEMPLATE).render(
@@ -1255,6 +1830,12 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld_sub: str,
             delta_cf=delta_cf,
             pior_dia=pior_dia,
             pior_cf=pior_cf,
+        ),
+        met_mod_m=met_mod_m,
+        met_mod_ne=met_mod_ne,
+        mod_tracker=dict(
+            cur_pct=cur_pct, cur_rs=cur_rs, cur_pld=cur_pld,
+            delta_pp=delta_pp,
         ),
     )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1284,6 +1865,7 @@ def main() -> None:
     detalhe = carregar_detalhe(cfg, dt_ini, dt_fim, patterns=patterns)
     cons    = carregar_consolidado(cfg, dt_ini, dt_fim, patterns=patterns)
     pld     = carregar_pld(cfg, dt_ini, dt_fim, cfg["submercado"])
+    ne_horario = carregar_solar_ne_agregado(cfg, dt_ini, dt_fim, pld)
 
     print("\n[4/4] Enriquecendo + selecionando grupos...")
     df = enriquecer(detalhe, cons, pld)
@@ -1298,7 +1880,8 @@ def main() -> None:
 
     out = Path(cfg["output_html"]).resolve()
     periodo = f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
-    gerar_html(mauriti, grupos, cfg["submercado"], periodo, out, date.today())
+    gerar_html(mauriti, grupos, pld, ne_horario, cfg["submercado"],
+                periodo, out, date.today())
     print(f"\n[OK] Dashboard salvo em: {out}")
     print(f"     Para preview local: abra '{out}' no navegador.")
     print(f"     Para publicar: ./public/ esta pronto pra deploy (GitHub Pages).")
