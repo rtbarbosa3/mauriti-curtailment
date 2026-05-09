@@ -149,6 +149,15 @@ def _is_recent_month(year: int, month: int, today: date, n: int) -> bool:
     return 0 <= delta < n
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+}
+
+
 def _download(url: str, dest: Path, timeout: int, retries: int,
                force: bool = False) -> bool:
     if dest.exists() and dest.stat().st_size > 0 and not force:
@@ -157,7 +166,8 @@ def _download(url: str, dest: Path, timeout: int, retries: int,
         dest.unlink()
     for attempt in range(1, retries + 1):
         try:
-            r = requests.get(url, timeout=timeout, stream=True)
+            r = requests.get(url, timeout=timeout, stream=True,
+                              headers=_BROWSER_HEADERS)
             if r.status_code == 404:
                 return False
             r.raise_for_status()
@@ -191,15 +201,19 @@ def _read_csv_robust(path: Path) -> pd.DataFrame:
 
 def _filter_relevant_usinas(df: pd.DataFrame,
                               patterns: list[str] | None) -> pd.DataFrame:
-    """Mantem apenas linhas onde nom_usina contem algum dos patterns.
-    Reduz drasticamente uso de memoria descartando usinas irrelevantes
-    logo na entrada (antes de concatenar varios meses)."""
-    if df.empty or not patterns or "nom_usina" not in df.columns:
+    """Mantem apenas linhas onde nom_usina OU nom_conjuntousina contem
+    algum dos patterns. Reduz drasticamente uso de memoria descartando
+    usinas irrelevantes logo na entrada."""
+    if df.empty or not patterns:
         return df
-    nom_norm = df["nom_usina"].astype(str).map(_normalize)
+    cols_check = [c for c in ("nom_usina", "nom_conjuntousina") if c in df.columns]
+    if not cols_check:
+        return df
     mask = pd.Series(False, index=df.index)
-    for pat in patterns:
-        mask |= nom_norm.str.contains(pat, na=False, regex=False)
+    for col in cols_check:
+        norm = df[col].astype(str).map(_normalize)
+        for pat in patterns:
+            mask |= norm.str.contains(pat, na=False, regex=False)
     return df[mask].copy()
 
 
@@ -359,7 +373,10 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
     df["geracao_mwh"] = df["val_geracaoverificada"].clip(lower=0) * 0.5
     df["estimada_mwh"] = df["val_geracaoestimada"].clip(lower=0) * 0.5
 
-    # Normaliza ceg em detail pra alinhar com consolidado no merge
+    # Garante nom_usina_norm presente
+    if "nom_usina_norm" not in df.columns and "nom_usina" in df.columns:
+        df["nom_usina_norm"] = df["nom_usina"].apply(_normalize)
+    # Normaliza ceg / id_ons (defesa contra whitespace)
     if "ceg" in df.columns:
         df["ceg"] = df["ceg"].astype(str).str.strip().str.upper()
     if "id_ons" in df.columns:
@@ -369,43 +386,61 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
     print(f"  Linhas em detail com curtailment > 0: {n_cortes:,}")
 
     if not cons.empty and "cod_razaorestricao" in cons.columns:
-        # Mantem apenas as colunas necessarias do consolidado
-        keep = ["din_instante", "ceg", "cod_razaorestricao", "cod_origemrestricao"]
-        if "id_ons" in cons.columns:
-            keep.append("id_ons")
-        c2 = cons[[c for c in keep if c in cons.columns]].copy()
+        # Prepara consolidado: normaliza identificadores e dedupe priorizando razao
+        c2 = cons.copy()
+        if "nom_usina_norm" not in c2.columns and "nom_usina" in c2.columns:
+            c2["nom_usina_norm"] = c2["nom_usina"].apply(_normalize)
+        if "ceg" in c2.columns:
+            c2["ceg"] = c2["ceg"].astype(str).str.strip().str.upper()
+        if "id_ons" in c2.columns:
+            c2["id_ons"] = c2["id_ons"].astype(str).str.strip().str.upper()
 
-        # Dedupe priorizando razoes ressarciveis
         prio = {"CNF": 0, "REL": 1, "PAR": 2, "ENE": 3}
-        c2["prio"] = c2["cod_razaorestricao"].map(prio).fillna(99)
-        c2 = (c2.sort_values(["din_instante", "ceg", "prio"])
-                .drop_duplicates(["din_instante", "ceg"], keep="first")
-                .drop(columns=["prio"]))
 
-        # 1a tentativa: merge por (din_instante, ceg)
-        df = df.merge(c2[[c for c in c2.columns if c != "id_ons"]],
-                       on=["din_instante", "ceg"], how="left")
-
-        n_match_ceg = int(df.loc[df["curtailment_mw"] > 0.01,
+        def _try_merge(left, right, keys):
+            """Tenta merge; retorna (df_merged, n_match_em_cortes)."""
+            r = right.copy()
+            r["prio"] = r["cod_razaorestricao"].map(prio).fillna(99)
+            cols = keys + ["cod_razaorestricao", "cod_origemrestricao", "prio"]
+            cols = [c for c in cols if c in r.columns]
+            r = (r[cols].sort_values(keys + ["prio"])
+                       .drop_duplicates(keys, keep="first")
+                       .drop(columns=["prio"]))
+            merged = left.merge(r, on=keys, how="left")
+            n_m = int(merged.loc[merged["curtailment_mw"] > 0.01,
                                   "cod_razaorestricao"].notna().sum())
-        rate_ceg = (100 * n_match_ceg / max(n_cortes, 1))
-        print(f"  Match via ceg: {n_match_ceg:,}/{n_cortes:,} cortes "
-              f"({rate_ceg:.1f}%)")
+            return merged, n_m
 
-        # Fallback: se match baixo, tenta por id_ons
-        if rate_ceg < 50 and "id_ons" in c2.columns and "id_ons" in df.columns:
-            print("  [!] Match baixo via ceg - tentando fallback por id_ons...")
-            df = df.drop(columns=["cod_razaorestricao", "cod_origemrestricao"],
-                          errors="ignore")
-            c3 = c2[["din_instante", "id_ons", "cod_razaorestricao",
-                      "cod_origemrestricao"]].drop_duplicates(
-                          ["din_instante", "id_ons"], keep="first")
-            df = df.merge(c3, on=["din_instante", "id_ons"], how="left")
-            n_match_id = int(df.loc[df["curtailment_mw"] > 0.01,
-                                     "cod_razaorestricao"].notna().sum())
-            rate_id = (100 * n_match_id / max(n_cortes, 1))
-            print(f"  Match via id_ons: {n_match_id:,}/{n_cortes:,} cortes "
-                  f"({rate_id:.1f}%)")
+        # Tentativa 1: nom_usina_norm
+        if "nom_usina_norm" in df.columns and "nom_usina_norm" in c2.columns:
+            merged, n_m = _try_merge(df, c2, ["din_instante", "nom_usina_norm"])
+            rate = 100 * n_m / max(n_cortes, 1)
+            print(f"  Match via nom_usina: {n_m:,}/{n_cortes:,} cortes "
+                  f"({rate:.1f}%)")
+            if rate >= 50:
+                df = merged
+            else:
+                print("  [!] Match baixo via nom_usina - tentando ceg...")
+                merged, n_m = _try_merge(df, c2, ["din_instante", "ceg"])
+                rate = 100 * n_m / max(n_cortes, 1)
+                print(f"  Match via ceg: {n_m:,}/{n_cortes:,} cortes "
+                      f"({rate:.1f}%)")
+                if rate >= 50:
+                    df = merged
+                elif "id_ons" in df.columns and "id_ons" in c2.columns:
+                    print("  [!] Match baixo via ceg - tentando id_ons...")
+                    merged, n_m = _try_merge(df, c2, ["din_instante", "id_ons"])
+                    rate = 100 * n_m / max(n_cortes, 1)
+                    print(f"  Match via id_ons: {n_m:,}/{n_cortes:,} cortes "
+                          f"({rate:.1f}%)")
+                    df = merged
+                else:
+                    df = merged
+        else:
+            # Fallback para ceg se nom_usina_norm nao existir
+            merged, n_m = _try_merge(df, c2, ["din_instante", "ceg"])
+            print(f"  Match via ceg: {n_m:,}/{n_cortes:,} cortes")
+            df = merged
 
     df["cod_razaorestricao"] = df.get("cod_razaorestricao",
                                         pd.Series(dtype=str)).fillna("DESCONHECIDA")
