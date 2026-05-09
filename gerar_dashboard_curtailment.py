@@ -158,6 +158,67 @@ _BROWSER_HEADERS = {
 }
 
 
+def _ccee_session() -> requests.Session:
+    """Cria uma sessao com cookies obtidos visitando a pagina do dataset CCEE,
+    headers de navegador e Referer. Resolve bloqueio 403 que acontece quando
+    se faz request direto na URL pda-download.ccee.org.br."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"),
+        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "image/avif,image/webp,*/*;q=0.8"),
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    })
+    # Warm-up: visita a pagina do dataset pra coletar cookies
+    try:
+        s.get("https://dadosabertos.ccee.org.br/dataset/pld_horario",
+                timeout=30, allow_redirects=True)
+    except requests.RequestException as e:
+        print(f"  [!] Warm-up CCEE falhou: {e} - tentando sem cookies")
+    return s
+
+
+def _download_ccee(session: requests.Session, url: str, dest: Path,
+                    timeout: int, retries: int, force: bool = False) -> bool:
+    """Download via sessao CCEE com Referer ajustado pro dataset."""
+    if dest.exists() and dest.stat().st_size > 0 and not force:
+        return True
+    if force and dest.exists():
+        dest.unlink()
+    headers = {"Referer": "https://dadosabertos.ccee.org.br/dataset/pld_horario"}
+    for attempt in range(1, retries + 1):
+        try:
+            r = session.get(url, timeout=timeout, stream=True, headers=headers,
+                              allow_redirects=True)
+            if r.status_code == 404:
+                return False
+            r.raise_for_status()
+            tmp = dest.with_suffix(dest.suffix + ".part")
+            total = int(r.headers.get("content-length", 0))
+            with tmp.open("wb") as f, tqdm(
+                total=total, unit="B", unit_scale=True, unit_divisor=1024,
+                desc=f"  {dest.name}", leave=False, ncols=80,
+            ) as bar:
+                for chunk in r.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        f.write(chunk); bar.update(len(chunk))
+            tmp.replace(dest); return True
+        except requests.RequestException as e:
+            if attempt == retries:
+                print(f"  [!] Falha download CCEE {url}: {e}")
+                return False
+    return False
+
+
 def _download(url: str, dest: Path, timeout: int, retries: int,
                force: bool = False) -> bool:
     if dest.exists() and dest.stat().st_size > 0 and not force:
@@ -365,35 +426,107 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
     today = date.today()
     anos = sorted({d.year for d in pd.date_range(dt_ini, dt_fim, freq="D")})
     print(f"\n[3/4] PLD horario CCEE ({anos})...")
+
     frames = []
-    for ano in anos:
-        url = CCEE_PLD_URLS.get(ano)
-        if not url: continue
-        dest = cache / f"pld_horario_{ano}.csv"
-        # Sempre re-baixa o ano corrente
-        force = (ano == today.year)
-        if not _download(url, dest, cfg["request_timeout"], cfg["max_retries"],
-                          force=force):
-            continue
-        try:
-            frames.append(_read_csv_robust(dest))
-        except Exception as e:
-            print(f"  [!] {e}")
+    anos_pendentes = list(anos)
+
+    # ========== ETAPA 1: lê PLD manual do repo (se disponivel) ==========
+    manual_dir = Path("./pld_data")
+    if manual_dir.exists():
+        print(f"       Procurando arquivos manuais em {manual_dir}/...")
+        for ano in list(anos_pendentes):
+            manual_file = manual_dir / f"pld_horario_{ano}.csv"
+            if manual_file.exists() and manual_file.stat().st_size > 0:
+                try:
+                    df_man = _read_csv_robust(manual_file)
+                    frames.append(df_man)
+                    anos_pendentes.remove(ano)
+                    print(f"  [OK] PLD {ano} carregado MANUAL de {manual_file}"
+                            f" ({manual_file.stat().st_size/1024:.0f} KB)")
+                except Exception as e:
+                    print(f"  [!] Erro lendo manual {manual_file}: {e}")
+
+    # ========== ETAPA 2: download da CCEE (anos faltantes) ==========
+    if anos_pendentes:
+        print(f"       Tentando CCEE download para {anos_pendentes}...")
+        print("       Iniciando sessao com warm-up no portal CCEE...")
+        session = _ccee_session()
+        for ano in anos_pendentes:
+            url = CCEE_PLD_URLS.get(ano)
+            if not url:
+                continue
+            dest = cache / f"pld_horario_{ano}.csv"
+            force = (ano == today.year)
+            if not _download_ccee(session, url, dest,
+                                    cfg["request_timeout"], cfg["max_retries"],
+                                    force=force):
+                print(f"  [!] Nao baixou PLD {ano} da CCEE "
+                      f"(provavel bloqueio IP)")
+                continue
+            try:
+                frames.append(_read_csv_robust(dest))
+                print(f"  [OK] PLD {ano} baixado da CCEE")
+            except Exception as e:
+                print(f"  [!] Erro lendo PLD {ano}: {e}")
+
     if not frames:
+        print("  [!] CRITICO: nenhum dado de PLD disponivel.")
+        print("  [!] >>> SOLUCAO: baixe manualmente os CSVs da CCEE em")
+        print("  [!]     https://dadosabertos.ccee.org.br/dataset/pld_horario")
+        print("  [!]     e coloque em pld_data/pld_horario_YYYY.csv no repo")
+        print("  [!] Modulacao sera mostrada com aviso de indisponibilidade.")
         rng = pd.date_range(dt_ini, dt_fim + pd.Timedelta(days=1), freq="h")
-        return pd.DataFrame({"hora": rng, "pld": 200.0})
+        df_fb = pd.DataFrame({"hora": rng, "pld": 200.0})
+        df_fb.attrs["fallback"] = True
+        return df_fb
+
     pld = pd.concat(frames, ignore_index=True)
     pld.columns = [c.strip().lower() for c in pld.columns]
-    col_data = next((c for c in pld.columns if "din_inicio" in c
-                     or "din_referencia" in c or "din_instante" in c), None)
-    col_sub = next((c for c in pld.columns if "submercado" in c), None)
-    col_pld = next((c for c in pld.columns
-                    if c == "val_pld" or ("pld" in c and "val" in c)), None)
-    if col_pld is None:
-        col_pld = next((c for c in pld.columns if "preco" in c or "valor" in c),
-                        None)
-    pld = pld.rename(columns={col_data: "hora", col_sub: "sub", col_pld: "pld"})
-    pld["hora"] = pd.to_datetime(pld["hora"], errors="coerce")
+
+    # ===== DETECCAO DE FORMATO =====
+    # Formato A (CCEE atual, manual download): MES_REFERENCIA;SUBMERCADO;
+    #   PERIODO_COMERCIALIZACAO;DIA;HORA;PLD_HORA
+    #   ex: 202512;NORDESTE;721;31;0;205.25
+    # Formato B (CCEE antigo, dados abertos API): din_inicio_periodo,
+    #   cd_submercado, val_pld
+    formato_a = ("mes_referencia" in pld.columns and "dia" in pld.columns
+                  and "hora" in pld.columns and "pld_hora" in pld.columns)
+
+    if formato_a:
+        print(f"  Formato A detectado: MES_REFERENCIA + DIA + HORA")
+        pld["mes_referencia"] = pld["mes_referencia"].astype(str).str.strip()
+        ano = pld["mes_referencia"].str[:4]
+        mes = pld["mes_referencia"].str[4:6]
+        dia = pd.to_numeric(pld["dia"], errors="coerce") \
+                  .astype("Int64").astype(str).str.zfill(2)
+        hr = pd.to_numeric(pld["hora"], errors="coerce") \
+                .astype("Int64").astype(str).str.zfill(2)
+        pld["hora_dt"] = pd.to_datetime(
+            ano + "-" + mes + "-" + dia + " " + hr + ":00:00",
+            errors="coerce")
+        # Mapeia nomes longos para siglas: NORDESTE->NE, NORTE->N, SUDESTE->SE, SUL->S
+        sub_map = {"NORDESTE": "NE", "NORTE": "N",
+                    "SUDESTE": "SE", "SUL": "S"}
+        pld["sub"] = (pld["submercado"].astype(str).str.upper().str.strip()
+                         .map(sub_map)
+                         .fillna(pld["submercado"]))
+        pld["pld"] = pld["pld_hora"]
+        pld["hora"] = pld["hora_dt"]
+        pld = pld.drop(columns=["hora_dt"])
+    else:
+        print(f"  Formato B detectado: din_inicio + val_pld")
+        col_data = next((c for c in pld.columns if "din_inicio" in c
+                         or "din_referencia" in c or "din_instante" in c), None)
+        col_sub = next((c for c in pld.columns if "submercado" in c), None)
+        col_pld = next((c for c in pld.columns
+                        if c == "val_pld" or ("pld" in c and "val" in c)), None)
+        if col_pld is None:
+            col_pld = next((c for c in pld.columns
+                            if "preco" in c or "valor" in c), None)
+        pld = pld.rename(columns={col_data: "hora", col_sub: "sub",
+                                    col_pld: "pld"})
+        pld["hora"] = pd.to_datetime(pld["hora"], errors="coerce")
+
     pld["pld"] = pd.to_numeric(pld["pld"].astype(str).str.replace(",", "."),
                                 errors="coerce")
     pld = pld.dropna(subset=["hora", "pld"])
@@ -401,7 +534,10 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
     pld = pld[(pld["hora"] >= pd.Timestamp(dt_ini)) &
               (pld["hora"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1))]
     pld = pld[["hora", "pld"]].drop_duplicates("hora").sort_values("hora")
-    print(f"  -> {len(pld):,} horas em {submercado}")
+    pld.attrs["fallback"] = False
+    print(f"  -> {len(pld):,} horas em {submercado}, "
+          f"PLD min={pld['pld'].min():.0f} max={pld['pld'].max():.0f} "
+          f"R$/MWh")
     return pld
 
 
@@ -1501,6 +1637,37 @@ footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
   <!-- ============================================================ -->
   <div class="tab-pane" data-tab="mod">
 
+    {% if pld_fallback %}
+    <div style="background:#fff7e0;border:2px solid #d4a017;
+                padding:24px 28px;margin:0 0 40px;border-radius:2px">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;
+                  color:#a07a00;letter-spacing:0.18em;text-transform:uppercase;
+                  font-weight:600;margin-bottom:10px">
+        &#9888; PLD Indispon&iacute;vel — Modula&ccedil;&atilde;o n&atilde;o calculada
+      </div>
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;
+                  line-height:1.5;color:#3d3833;margin-bottom:14px">
+        N&atilde;o foi poss&iacute;vel obter o PLD hor&aacute;rio da CCEE nesta execu&ccedil;&atilde;o
+        (a CCEE bloqueia requests de IPs de cloud providers como o GitHub Actions).
+        Os gr&aacute;ficos abaixo est&atilde;o usando R$ 200/MWh como placeholder, o que
+        <strong>zera artificialmente o desconto de modula&ccedil;&atilde;o</strong>.
+      </div>
+      <div style="font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+                  line-height:1.6;color:#5a5147;
+                  border-top:1px dashed #d4a017;padding-top:12px;margin-top:8px">
+        <strong style="color:#3d3833">Como resolver:</strong> baixe os CSVs de
+        <code style="background:#fdf3d0;padding:2px 6px;border-radius:2px">
+        pld_horario_2025.csv</code> e
+        <code style="background:#fdf3d0;padding:2px 6px;border-radius:2px">
+        pld_horario_2026.csv</code> em
+        <a href="https://dadosabertos.ccee.org.br/dataset/pld_horario"
+           style="color:#a8442f">dadosabertos.ccee.org.br</a>,
+        crie a pasta <code style="background:#fdf3d0;padding:2px 6px">pld_data/</code>
+        no repo e commite os arquivos l&aacute;. O script vai us&aacute;-los na pr&oacute;xima execu&ccedil;&atilde;o.
+      </div>
+    </div>
+    {% endif %}
+
     <div class="hero">
       <div class="kicker">PowerChina &middot; Mauriti &middot; Valor de perfil</div>
       <h1>Quanto custou <em>quando</em><br>geramos cada MWh.</h1>
@@ -1811,6 +1978,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
             g_mod_top_dias(diario_m, n=10)))
 
     grupos_str = ", ".join([g.label for g in grupos]) if grupos else "—"
+    pld_fallback = bool(pld.attrs.get("fallback", False))
     html = Template(HTML_TEMPLATE).render(
         met_m=met_m, met_b=met_b,
         n_grupos=len(grupos), grupos_str=grupos_str,
@@ -1819,6 +1987,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
+        pld_fallback=pld_fallback,
         tracker=dict(
             cur_first=today.replace(day=1).strftime("%B/%Y"),
             days_in_month=days_in_month,
