@@ -998,30 +998,24 @@ def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
     if cortes.empty:
         return pd.DataFrame()
 
-    # Ordena por usina + tempo
-    cortes = cortes.sort_values(["nom_usina", "din_instante"])
+    # Ordena por usina + razao + tempo (importante: ordem garante consecutividade)
+    cortes = cortes.sort_values(
+        ["nom_usina", "cod_razaorestricao", "din_instante"])
 
     # Detecta "eventos": agrupa linhas consecutivas da mesma usina+razao
-    # cuja diferenca de tempo entre instantes <= 1h (intervalo dataset = 30min)
-    cortes["delta"] = cortes.groupby(["nom_usina", "cod_razaorestricao"])[
-        "din_instante"].diff()
+    # cuja diferenca de tempo entre instantes <= 1h (intervalo dataset = 30min).
+    # delta dentro de cada (usina, razao) -- primeiro elemento sempre NaN.
+    cortes["delta"] = cortes.groupby(
+        ["nom_usina", "cod_razaorestricao"])["din_instante"].diff()
+    # Cada True marca inicio de um novo evento (gap > 1h ou primeira linha do grupo)
     novo_evento = (
         (cortes["delta"] > pd.Timedelta(hours=1))
         | cortes["delta"].isna()
     )
-    cortes["evento_id"] = (
-        cortes.groupby(["nom_usina", "cod_razaorestricao"])
-        [novo_evento.values].cumsum()
-    )
+    # cumsum global da serie boolean -> IDs unicos crescentes por evento
+    cortes["evento_id"] = novo_evento.cumsum()
 
-    # Mas ainda precisamos de ID global unico:
-    cortes["evento_global"] = (
-        cortes["nom_usina"] + "_"
-        + cortes["cod_razaorestricao"] + "_"
-        + cortes["evento_id"].astype(str)
-    )
-
-    eventos = cortes.groupby("evento_global").agg(
+    eventos = cortes.groupby("evento_id").agg(
         usina=("nom_usina", "first"),
         razao=("cod_razaorestricao", "first"),
         origem=("cod_origemrestricao", "first"),
