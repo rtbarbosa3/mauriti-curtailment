@@ -566,11 +566,22 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
     n_cortes = int((df["curtailment_mw"] > 0.01).sum())
     print(f"  Linhas em detail com curtailment > 0: {n_cortes:,}")
 
+    # Garante nom_conjuntousina_norm no detail tambem
+    if ("nom_conjuntousina" in df.columns
+            and "nom_conjuntousina_norm" not in df.columns):
+        df["nom_conjuntousina_norm"] = (df["nom_conjuntousina"]
+                                          .astype(str).map(_normalize))
+
     if not cons.empty and "cod_razaorestricao" in cons.columns:
         # Prepara consolidado: normaliza identificadores e dedupe priorizando razao
         c2 = cons.copy()
         if "nom_usina_norm" not in c2.columns and "nom_usina" in c2.columns:
             c2["nom_usina_norm"] = c2["nom_usina"].apply(_normalize)
+        # cons tambem tem nom_conjuntousina as vezes - normaliza tambem
+        if ("nom_conjuntousina" in c2.columns
+                and "nom_conjuntousina_norm" not in c2.columns):
+            c2["nom_conjuntousina_norm"] = (c2["nom_conjuntousina"]
+                                              .astype(str).map(_normalize))
         if "ceg" in c2.columns:
             c2["ceg"] = c2["ceg"].astype(str).str.strip().str.upper()
         if "id_ons" in c2.columns:
@@ -580,11 +591,13 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
         print("\n  --- DIAGNOSTICO: amostras dos dois datasets ---")
         sd = df[df["curtailment_mw"] > 0.01].head(5)
         cols_d = [c for c in ["din_instante", "nom_usina", "nom_usina_norm",
+                                "nom_conjuntousina", "nom_conjuntousina_norm",
                                 "ceg", "id_ons"] if c in sd.columns]
         print(f"  DETAIL (5 primeiros cortes):")
         for _, r in sd[cols_d].iterrows():
             ln = f"    t={r['din_instante']} | nom='{r.get('nom_usina','?')}'"
-            ln += f" | norm='{r.get('nom_usina_norm','?')}'"
+            ln += f" | conj='{r.get('nom_conjuntousina','?')}'"
+            ln += f" | conj_norm='{r.get('nom_conjuntousina_norm','?')}'"
             ln += f" | ceg='{r.get('ceg','?')}' | id_ons='{r.get('id_ons','?')}'"
             print(ln)
         # Tenta achar Mauriti no consolidado
@@ -596,12 +609,13 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
         else:
             sc = c2.head(3)
         cols_c = [c for c in ["din_instante", "nom_usina", "nom_usina_norm",
+                                "nom_conjuntousina", "nom_conjuntousina_norm",
                                 "ceg", "id_ons", "cod_razaorestricao"]
                   if c in sc.columns]
         print(f"  CONS (3 primeiros Mauriti):")
         for _, r in sc[cols_c].iterrows():
             ln = f"    t={r['din_instante']} | nom='{r.get('nom_usina','?')}'"
-            ln += f" | norm='{r.get('nom_usina_norm','?')}'"
+            ln += f" | conj='{r.get('nom_conjuntousina','?')}'"
             ln += f" | ceg='{r.get('ceg','?')}' | id_ons='{r.get('id_ons','?')}'"
             ln += f" | razao='{r.get('cod_razaorestricao','?')}'"
             print(ln)
@@ -631,25 +645,47 @@ def enriquecer(detalhe: pd.DataFrame, cons: pd.DataFrame,
             rate = 100 * n_m / max(n_cortes, 1)
             print(f"  Match via nom_usina: {n_m:,}/{n_cortes:,} cortes "
                   f"({rate:.1f}%)")
-            if rate >= 50:
-                df = merged
-            else:
+            best_merged, best_rate = merged, rate
+            if rate < 50:
                 print("  [!] Match baixo via nom_usina - tentando ceg...")
                 merged, n_m = _try_merge(df, c2, ["din_instante", "ceg"])
                 rate = 100 * n_m / max(n_cortes, 1)
                 print(f"  Match via ceg: {n_m:,}/{n_cortes:,} cortes "
                       f"({rate:.1f}%)")
-                if rate >= 50:
-                    df = merged
-                elif "id_ons" in df.columns and "id_ons" in c2.columns:
-                    print("  [!] Match baixo via ceg - tentando id_ons...")
-                    merged, n_m = _try_merge(df, c2, ["din_instante", "id_ons"])
-                    rate = 100 * n_m / max(n_cortes, 1)
-                    print(f"  Match via id_ons: {n_m:,}/{n_cortes:,} cortes "
-                          f"({rate:.1f}%)")
-                    df = merged
-                else:
-                    df = merged
+                if rate > best_rate:
+                    best_merged, best_rate = merged, rate
+            if best_rate < 50 and "id_ons" in df.columns and "id_ons" in c2.columns:
+                print("  [!] Match baixo via ceg - tentando id_ons...")
+                merged, n_m = _try_merge(df, c2, ["din_instante", "id_ons"])
+                rate = 100 * n_m / max(n_cortes, 1)
+                print(f"  Match via id_ons: {n_m:,}/{n_cortes:,} cortes "
+                      f"({rate:.1f}%)")
+                if rate > best_rate:
+                    best_merged, best_rate = merged, rate
+            # Tentativa 4 (CRITICA): cons reporta razoes por CONJUNTO
+            # (ex: "CONJ. MAURITI"), enquanto detail tem UFVs individuais
+            # (Mauriti 1, Mauriti 2...). Casa nom_conjuntousina_norm
+            # do detail com nom_usina_norm do cons.
+            if (best_rate < 50 and "nom_conjuntousina_norm" in df.columns
+                    and "nom_usina_norm" in c2.columns):
+                print("  [!] Match baixo - tentando conjuntousina (detail) "
+                        "x nom_usina (cons)...")
+                # Renomeia coluna do detail temporariamente
+                df_tmp = df.rename(
+                    columns={"nom_conjuntousina_norm": "_join_key"})
+                c2_tmp = c2.rename(columns={"nom_usina_norm": "_join_key"})
+                merged, n_m = _try_merge(df_tmp, c2_tmp,
+                                          ["din_instante", "_join_key"])
+                rate = 100 * n_m / max(n_cortes, 1)
+                print(f"  Match via conjuntousina: {n_m:,}/{n_cortes:,} "
+                        f"cortes ({rate:.1f}%)")
+                if rate > best_rate:
+                    # Renomeia de volta
+                    merged = merged.rename(
+                        columns={"_join_key": "nom_conjuntousina_norm"})
+                    best_merged, best_rate = merged, rate
+            df = best_merged
+            print(f"  >>> Melhor match: {best_rate:.1f}%")
         else:
             # Fallback para ceg se nom_usina_norm nao existir
             merged, n_m = _try_merge(df, c2, ["din_instante", "ceg"])
