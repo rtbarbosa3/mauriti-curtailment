@@ -121,6 +121,14 @@ RAZAO_LABEL = {
 }
 RAZAO_RESSARCIVEL = {"REL": True, "CNF": True, "ENE": False, "PAR": False}
 
+# Origem da restricao (cod_origemrestricao). Dataset ONS usa 2 valores principais:
+# LOC = local (proximo da usina); SIS = sistemico (rede regional).
+ORIGEM_LABEL = {
+    "LOC": "LOC — Local (near plant)",
+    "SIS": "SIS — Systemic (regional grid)",
+    "DESCONHECIDA": "Unknown",
+}
+
 
 # =============================================================================
 #  UTILS
@@ -1033,12 +1041,15 @@ def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
     eventos["hora_fim"] = eventos["data_fim"].dt.strftime("%H:%M")
     eventos["data_inicio_str"] = eventos["data_inicio"].dt.strftime("%Y-%m-%d")
     eventos["data_fim_str"] = eventos["data_fim"].dt.strftime("%Y-%m-%d")
+    # Origem legivel: "LOC" -> "LOC — Local (near plant)"
+    eventos["origem_label"] = eventos["origem"].map(
+        lambda x: ORIGEM_LABEL.get(x, x))
     eventos = eventos.sort_values("data_inicio", ascending=False)
 
-    # Reordena colunas
+    # Reordena colunas (mantem 'origem' = codigo ONS oficial + 'origem_label' legivel)
     cols_ord = ["data_inicio_str", "hora_inicio", "data_fim_str", "hora_fim",
-                "duracao_h", "usina", "razao", "origem", "mwh_cortado",
-                "pld_medio"]
+                "duracao_h", "usina", "razao", "origem", "origem_label",
+                "mwh_cortado", "pld_medio"]
     return eventos[cols_ord]
 
 
@@ -1075,14 +1086,26 @@ def metricas_ren1030(eventos: pd.DataFrame, df_mauriti: pd.DataFrame) -> dict:
 def cruzar_irradiancia(df_mauriti: pd.DataFrame,
                          irradiancia: pd.DataFrame) -> pd.DataFrame:
     """Cruza geracao+curtailment Mauriti com GHI da NASA POWER.
-    Retorna DF horario com colunas: hora, mwh_gen, mwh_curt, ghi, temp."""
+    Retorna DF horario com colunas: hora, mwh_gen, mwh_curt, ghi, temp.
+
+    IMPORTANTE: o `mwh_curt` aqui considera APENAS linhas com razao ONS
+    oficialmente classificada (REL/CNF/ENE/PAR). Linhas com razao
+    'DESCONHECIDA' (subgeracao nao-classificada, ramp-up matinal, etc)
+    sao EXCLUIDAS porque nao representam curtailment 'verdadeiro' --
+    sao apenas artefatos de calibração da estimativa do ONS.
+
+    Ja `mwh_gen` e `mwh_estim` continuam refletindo o total real da usina."""
     if df_mauriti.empty or irradiancia.empty:
         return pd.DataFrame()
     df = df_mauriti.copy()
     df["hora"] = df["din_instante"].dt.floor("h")
+    # Curtailment "classificado" = so o que tem razao ONS oficial
+    razoes_oficiais = ["REL", "CNF", "ENE", "PAR"]
+    df["curt_classificado_mwh"] = df["curtailment_mwh"].where(
+        df["cod_razaorestricao"].isin(razoes_oficiais), 0.0)
     agg = df.groupby("hora").agg(
         mwh_gen=("geracao_mwh", "sum"),
-        mwh_curt=("curtailment_mwh", "sum"),
+        mwh_curt=("curt_classificado_mwh", "sum"),
         mwh_estim=("estimada_mwh", "sum"),
     ).reset_index()
     out = agg.merge(irradiancia[["hora", "ghi", "temp"]], on="hora", how="inner")
@@ -1659,7 +1682,9 @@ def g_ren_origem(eventos: pd.DataFrame):
     if eventos.empty:
         return go.Figure(layout=dict(LAY,
                                        title=ed_title("Top causes", 20)))
-    by_origem = (eventos.groupby("origem")
+    # Usa origem_label (legivel) se existir; senao fallback pra origem (codigo)
+    col_label = "origem_label" if "origem_label" in eventos.columns else "origem"
+    by_origem = (eventos.groupby(col_label)
                   .agg(mwh=("mwh_cortado", "sum"),
                         n=("usina", "count"))
                   .sort_values("mwh", ascending=True).tail(10))
@@ -1676,9 +1701,11 @@ def g_ren_origem(eventos: pd.DataFrame):
     lay = dict(LAY); lay.update(
         title=ed_title("Top sources of eligible curtailment", 20),
         xaxis=dict(title="MWh", gridcolor=EL["border"]),
-        yaxis=dict(gridcolor=EL["border"]),
+        yaxis=dict(gridcolor=EL["border"],
+                    tickfont=dict(family="'IBM Plex Mono',monospace",
+                                   size=11, color=EL["ink"])),
         height=max(300, 38 * len(by_origem) + 80),
-        margin=dict(l=160, r=180, t=60, b=50),
+        margin=dict(l=260, r=180, t=60, b=50),  # label mais larga
         showlegend=False,
     )
     fig.update_layout(**lay); return fig
@@ -2631,9 +2658,13 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       <span class="tag" data-i18n="ren_s2_tag">RESTRICTION ORIGIN</span>
     </div>
     <p class="section-desc" data-i18n="ren_s2_desc">
-      Origin field as reported by ONS (transmission line, substation,
-      bay, etc.). Helps target which infrastructure piece is generating
-      the largest claim.
+      Origin classification as reported by ONS:
+      <strong>LOC</strong> = local (transmission line, substation or bay
+      near the plant; specific counterparty can be held responsible) ·
+      <strong>SIS</strong> = systemic (regional grid limitations, e.g.
+      saturated NE → SE/CO export corridor; structural issue affecting
+      the entire region). The split tells you how much of the claim
+      has an addressable counterparty vs how much is a systemic constraint.
     </p>
     <div class="chart"><div id="ren_origem" style="height:380px"></div></div>
 
@@ -2680,7 +2711,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
             <td>{{ "%.1f"|format(ev.duracao_h) }}h</td>
             <td>{{ ev.usina }}</td>
             <td class="razao {{ ev.razao|lower }}">{{ ev.razao }}</td>
-            <td>{{ ev.origem }}</td>
+            <td>{{ ev.origem_label }}</td>
             <td class="num">{{ "%.1f"|format(ev.mwh_cortado) }}</td>
             <td class="num">{{ "%.0f"|format(ev.pld_medio) }}</td>
           </tr>
@@ -2727,10 +2758,14 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
         <em data-i18n="solar_h1_b">when the sun shines most?</em>
       </h1>
       <p class="lede" data-i18n="solar_lede">
-        Cross-reference between Mauriti's curtailment and Global Horizontal
-        Irradiance (GHI) from NASA POWER for the plant coordinates. Reveals
-        whether cuts concentrate on high-irradiance hours — when the
-        opportunity cost of curtailment is largest.
+        Cross-reference between Mauriti's <strong>ONS-classified
+        curtailment</strong> (reasons REL/CNF/ENE/PAR) and Global
+        Horizontal Irradiance (GHI) from NASA POWER for the plant
+        coordinates. Reveals whether cuts concentrate on high-irradiance
+        hours — when the opportunity cost of curtailment is largest.
+        Unclassified underperformance (morning ramp-up, optimistic ONS
+        baseline) is excluded so the signal reflects only "real"
+        curtailment.
       </p>
       <div class="byline">
         <span data-i18n="solar_byline_src">Source</span> <span>NASA POWER</span> &nbsp;&middot;&nbsp;
@@ -2838,6 +2873,14 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       <dd data-i18n="gloss_reasons">Curtailment reason codes. REL =
           external unavailability, CNF = reliability, ENE = energy
           (oversupply), PAR = access opinion limit.</dd>
+      <dt>LOC / SIS</dt>
+      <dd data-i18n="gloss_origins">Restriction origin codes.
+          <strong>LOC</strong> = local (constraint near the plant —
+          transmission line, substation or bay; a specific transmission
+          asset is responsible). <strong>SIS</strong> = systemic
+          (regional grid constraint — typically saturated inter-regional
+          export limits or stability requirements; affects multiple
+          plants simultaneously).</dd>
       <dt>GHI</dt>
       <dd data-i18n="gloss_ghi">Global Horizontal Irradiance. Total
           solar power received per square meter on a horizontal surface.
@@ -3015,7 +3058,7 @@ const I18N = {
     ren_s1_desc: "Barras empilhadas mostram como o volume ressarcível se distribui entre REL e CNF — quebra útil pra montagem do dossiê.",
     ren_s2_title: "Top causas",
     ren_s2_tag: "ORIGEM DA RESTRIÇÃO",
-    ren_s2_desc: "Campo de origem como reportado pelo ONS (linha de transmissão, subestação, bay, etc.). Ajuda a direcionar qual peça de infra está gerando o maior pleito.",
+    ren_s2_desc: "Classificação de origem como reportada pelo ONS: <strong>LOC</strong> = local (linha de transmissão, subestação ou bay próximo da usina; há uma contraparte específica que pode ser cobrada) · <strong>SIS</strong> = sistêmico (limitação da rede regional, ex: corredor de exportação NE → SE/CO saturado; problema estrutural que afeta a região inteira). A divisão mostra quanto do pleito tem contraparte direta vs quanto é restrição sistêmica.",
     ren_s3_title: "Log de eventos",
     ren_s3_tag: "EXPORTÁVEL",
     ren_s3_desc: "Cada evento elegível identificado no período, com timestamp de início/fim, usina, razão, origem e energia cortada. Use o export CSV para processamento adicional.",
@@ -3039,7 +3082,7 @@ const I18N = {
     solar_kicker: "NASA POWER · Irradiância local",
     solar_h1_a: "Estamos cortando",
     solar_h1_b: "quando o sol mais brilha?",
-    solar_lede: "Cruzamento entre o curtailment do Mauriti e a Irradiância Horizontal Global (GHI) da NASA POWER nas coordenadas da usina. Revela se os cortes se concentram em horas de alta irradiância — quando o custo de oportunidade é maior.",
+    solar_lede: "Cruzamento entre o <strong>curtailment classificado pelo ONS</strong> (razões REL/CNF/ENE/PAR) do Mauriti e a Irradiância Horizontal Global (GHI) da NASA POWER nas coordenadas da usina. Revela se os cortes se concentram em horas de alta irradiância — quando o custo de oportunidade é maior. Subgeração não-classificada (ramp-up matinal, baseline otimista do ONS) é excluída pra o sinal refletir apenas curtailment 'verdadeiro'.",
     solar_byline_src: "Fonte",
     solar_byline_coord: "Coordenadas",
     solar_byline_lat: "Latência",
@@ -3069,6 +3112,7 @@ const I18N = {
     gloss_ren: "Resolução Normativa ANEEL 1.030/2022. Define elegibilidade de curtailment para ressarcimento. Razões REL e CNF são elegíveis; ENE (energética) e PAR (parecer de acesso) geralmente não.",
     gloss_cf: "Curtailment Factor. Energia cortada dividida pela referência (estimada), em %.",
     gloss_reasons: "Códigos de razão do corte. REL = indisponibilidade externa, CNF = confiabilidade, ENE = energética (sobre-oferta), PAR = limite por parecer de acesso.",
+    gloss_origins: "Códigos de origem da restrição. <strong>LOC</strong> = local (restrição próxima da usina — linha de transmissão, subestação ou bay; um ativo de transmissão específico é responsável). <strong>SIS</strong> = sistêmico (restrição da rede regional — tipicamente saturação dos limites de exportação entre regiões ou requisitos de estabilidade; afeta várias usinas ao mesmo tempo).",
     gloss_ghi: "Global Horizontal Irradiance. Potência solar total recebida por m² em superfície horizontal. Da reanálise NASA POWER.",
     gloss_modulation_dt: "Desconto de modulação",
     gloss_modulation: "Diferença entre receita real (Σ MWh<sub>h</sub> × PLD<sub>h</sub>) e receita \"flat\" (MWh<sub>dia</sub> × PLD<sub>médio diário</sub>). Captura o custo de oportunidade de gerar em horas de PLD baixo.",
@@ -3276,10 +3320,14 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         csv_out = Path(cfg["output_csv_ren1030"]).resolve()
         csv_out.parent.mkdir(parents=True, exist_ok=True)
         eventos_csv = eventos.copy()
+        # eventos tem colunas: data_inicio_str, hora_inicio, data_fim_str,
+        # hora_fim, duracao_h, usina, razao, origem (cod), origem_label,
+        # mwh_cortado, pld_medio
         eventos_csv.columns = [
             "date_start", "time_start", "date_end", "time_end",
-            "duration_h", "plant", "reason", "origin", "mwh_curtailed",
-            "pld_avg_rs_mwh"
+            "duration_h", "plant", "reason",
+            "origin_code", "origin_label",
+            "mwh_curtailed", "pld_avg_rs_mwh"
         ]
         eventos_csv.to_csv(csv_out, index=False, encoding="utf-8",
                             float_format="%.3f")
@@ -3291,6 +3339,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
 
     # ========== IRRADIANCIA ==========
     print("\n[*] Cruzando curtailment x GHI NASA POWER...")
+    print("    (curtailment filtrado: apenas razoes ONS REL/CNF/ENE/PAR)")
     cruz_irr = cruzar_irradiancia(mauriti.df, irradiancia)
     met_irr = metricas_irradiancia(cruz_irr)
     if not met_irr.get("vazio"):
