@@ -1460,7 +1460,11 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
     else:
         next_first = date(cur_first.year, cur_first.month + 1, 1)
     days_in_month = (next_first - cur_first).days
-    all_days = [cur_first + timedelta(days=i) for i in range(days_in_month)]
+    # MUDANCA (v5.3): cortar eixo X ate o dia atual + 1 buffer
+    # Antes: mostrava todos os 31 dias do mes (com 20+ vazios no comeco do mes)
+    # Agora: mostra apenas dia 1 ate today + 1 dia de margem
+    days_to_show = min(today.day + 1, days_in_month)
+    all_days = [cur_first + timedelta(days=i) for i in range(days_to_show)]
 
     cur = diario_m[(diario_m["dia"] >= cur_first) & (diario_m["dia"] < next_first)].copy()
     cur = (cur.set_index("dia").reindex(all_days).reset_index()
@@ -1493,7 +1497,8 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
         title=ed_title(f"Mauriti — {cur_first.strftime('%B/%Y').lower()}  ·  "
                         "receita real vs receita flat", 20),
         barmode="group",
-        xaxis=dict(title=f"dia (1 a {days_in_month})", gridcolor=EL["border"]),
+        xaxis=dict(title=f"dia ({today.day} de {days_in_month} dias)",
+                    gridcolor=EL["border"]),
         yaxis=dict(title="R$ / dia", gridcolor=EL["border"]),
         yaxis2=dict(title="% desconto modulacao", overlaying="y", side="right",
                      showgrid=False, color=EL["accent_today"], ticksuffix="%"),
@@ -2098,6 +2103,27 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .empty-msg{padding:48px 32px;text-align:center;color:var(--muted);
   font-family:'Fraunces',Georgia,serif;font-size:17px;font-style:italic}
 
+/* Modulation: recap line above chart + day-by-day table below */
+.mod-recap{margin:0 0 18px;padding:14px 20px;
+  background:var(--bg-alt);border-left:3px solid var(--accent-today);
+  border-radius:2px;
+  font-family:'IBM Plex Sans',sans-serif;font-size:13px;line-height:1.7;
+  color:var(--ink-2)}
+.mod-recap strong{color:var(--ink);font-weight:500}
+.mod-recap .recap-bad{color:var(--accent-today);font-weight:600}
+.mod-table-wrap{margin:32px 0 0;padding:24px 28px;
+  background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
+.mod-table-head{margin-bottom:18px}
+.mod-table-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:18px;margin:0 0 6px;color:var(--ink)}
+.mod-table-sub{display:block;font-family:'IBM Plex Sans',sans-serif;
+  font-size:12px;line-height:1.55;color:var(--muted);max-width:620px}
+.mod-table tr.row-mid td{background:rgba(212,160,23,0.07)}
+.mod-table tr.row-bad td{background:rgba(217,46,15,0.08)}
+.mod-table tr.row-bad td.delta{color:var(--accent-today);font-weight:600}
+.mod-table tr.row-mid td.delta{color:var(--accent-2);font-weight:600}
+.mod-table td.delta{font-variant-numeric:tabular-nums}
+
 footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
   font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
   line-height:1.8;letter-spacing:0.04em}
@@ -2475,9 +2501,67 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
         </div>
       </div>
 
+      {% if not mod_summary.vazio %}
+      <div class="mod-recap">
+        <span data-i18n="mod_recap_days">{{ mod_summary.n_dias }} days elapsed</span> ·
+        <span><strong>{{ "{:,.0f}".format(mod_summary.mwh_total).replace(",", " ") }} MWh</strong> <span data-i18n="mod_recap_gen">generated</span></span> ·
+        <span data-i18n="mod_recap_real">Real revenue</span>
+        <strong>R$ {{ "%.2f"|format(mod_summary.receita_real/1e6) }}M</strong>
+        (<span data-i18n="mod_recap_vs">vs flat</span> R$ {{ "%.2f"|format(mod_summary.receita_flat/1e6) }}M) ·
+        <span data-i18n="mod_recap_disc">Discount</span>
+        <strong class="recap-bad">{{ "%.2f"|format(mod_summary.desconto_pct) }}%</strong>
+        (<strong class="recap-bad">−R$ {{ "%.0f"|format((mod_summary.desconto_rs|abs)/1000) }}k</strong>) ·
+        <span data-i18n="mod_recap_worst">Worst day</span>
+        <strong>{{ mod_summary.pior_dia }}</strong> ({{ "%.1f"|format(mod_summary.pior_pct) }}%)
+      </div>
+      {% endif %}
+
       <div style="background:transparent;padding:0">
         <div id="mod_tracker" style="height:460px"></div>
       </div>
+
+      {% if mod_tabela_dias %}
+      <div class="mod-table-wrap">
+        <div class="mod-table-head">
+          <h4 data-i18n="mod_table_title">Day-by-day price detail · R$/MWh</h4>
+          <span class="mod-table-sub" data-i18n="mod_table_sub">
+            Compares what Mauriti would receive at the daily PLD average ("flat")
+            against what it actually received per MWh sold ("effective"). The gap
+            is the modulation cost per MWh.
+          </span>
+        </div>
+        <div class="events-table-wrap">
+        <table class="events-table mod-table">
+          <thead>
+            <tr>
+              <th data-i18n="mod_th_day">Day</th>
+              <th class="num" data-i18n="mod_th_mwh">MWh generated</th>
+              <th class="num" data-i18n="mod_th_pld_flat">PLD flat (R$/MWh)</th>
+              <th class="num" data-i18n="mod_th_pld_eff">PLD effective (R$/MWh)</th>
+              <th class="num" data-i18n="mod_th_delta_mwh">Δ R$/MWh</th>
+              <th class="num" data-i18n="mod_th_delta_pct">Δ %</th>
+              <th class="num" data-i18n="mod_th_revenue">Real revenue (R$)</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in mod_tabela_dias %}
+            {% set bad = r.desconto_pct < -40 %}
+            {% set mid = r.desconto_pct < -25 and r.desconto_pct >= -40 %}
+            <tr{% if bad %} class="row-bad"{% elif mid %} class="row-mid"{% endif %}>
+              <td>{{ r.dia }}</td>
+              <td class="num">{{ "{:,.0f}".format(r.mwh).replace(",", " ") }}</td>
+              <td class="num">{{ "%.0f"|format(r.pld_medio) }}</td>
+              <td class="num">{{ "%.0f"|format(r.pld_efetivo) }}</td>
+              <td class="num delta">{{ "%+.0f"|format(r.delta_rs_mwh) }}</td>
+              <td class="num delta">{{ "%+.2f"|format(r.desconto_pct) }}%</td>
+              <td class="num">{{ "{:,.0f}".format(r.receita_real).replace(",", " ") }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      </div>
+      {% endif %}
     </div>
 
     <div class="bignum">
@@ -3007,6 +3091,21 @@ const I18N = {
     curt_s5_tag: "DIA DA SEMANA × HORA",
     curt_s5_desc: "Mesmo heatmap, agregado por dia-da-semana × hora. Revela se o curtailment é fenômeno semanal estrutural (ex: fins-de-semana com carga industrial menor = mais excedente solar = mais corte).",
 
+    mod_recap_days: "dias decorridos",
+    mod_recap_gen: "gerados",
+    mod_recap_real: "Receita real",
+    mod_recap_vs: "vs flat",
+    mod_recap_disc: "Desconto",
+    mod_recap_worst: "Pior dia",
+    mod_table_title: "Detalhe diário de preços · R$/MWh",
+    mod_table_sub: "Compara o que Mauriti receberia se vendesse à média diária do PLD (\"flat\") com o que efetivamente recebeu por MWh vendido (\"efetivo\"). A diferença é o custo de modulação por MWh.",
+    mod_th_day: "Dia",
+    mod_th_mwh: "MWh gerados",
+    mod_th_pld_flat: "PLD flat (R$/MWh)",
+    mod_th_pld_eff: "PLD efetivo (R$/MWh)",
+    mod_th_delta_mwh: "Δ R$/MWh",
+    mod_th_delta_pct: "Δ %",
+    mod_th_revenue: "Receita real (R$)",
     mod_kicker: "PowerChina · Mauriti · Valor de perfil",
     mod_h1_a: "Quanto custou",
     mod_h1_b: "quando",
@@ -3290,7 +3389,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
     # Tracker stats da modulacao (mes corrente)
     cur_first = today.replace(day=1)
     if not diario_m.empty:
-        cur_m = diario_m[diario_m["dia"] >= cur_first]
+        cur_m = diario_m[diario_m["dia"] >= cur_first].copy()
         if not cur_m.empty:
             cur_pct = float((100 * (cur_m["receita_real"].sum()
                                      - cur_m["receita_flat"].sum()) /
@@ -3301,9 +3400,57 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         else:
             cur_pct, cur_rs, cur_pld = None, None, None
     else:
+        cur_m = pd.DataFrame()
         cur_pct, cur_rs, cur_pld = None, None, None
     delta_pp = ((cur_pct - met_mod_ne["desconto_pct"])
                 if cur_pct is not None and not met_mod_ne.get("vazio") else None)
+
+    # ========== RESUMO MACRO MES CORRENTE + TABELA DIA-A-DIA (v5.3) ==========
+    # Resumo macro: 1 linha de prosa acima do grafico mostrando totais
+    mod_summary = {"vazio": True}
+    mod_tabela_dias: list[dict] = []
+    if not cur_m.empty:
+        mwh_total = float(cur_m["mwh_dia"].sum())
+        receita_real_total = float(cur_m["receita_real"].sum())
+        receita_flat_total = float(cur_m["receita_flat"].sum())
+        pld_medio_mes = float(cur_m["pld_avg"].mean())
+        pld_efetivo_mes = (receita_real_total / mwh_total
+                            if mwh_total > 0 else 0.0)
+        n_dias = int(len(cur_m))
+        # Pior dia (% mais negativo, ou seja, com pior desconto)
+        idx_pior = cur_m["desconto_pct"].idxmin()
+        pior = cur_m.loc[idx_pior]
+        mod_summary = dict(
+            vazio=False,
+            n_dias=n_dias,
+            mwh_total=mwh_total,
+            receita_real=receita_real_total,
+            receita_flat=receita_flat_total,
+            desconto_rs=receita_real_total - receita_flat_total,
+            desconto_pct=cur_pct or 0.0,
+            pld_medio=pld_medio_mes,
+            pld_efetivo=pld_efetivo_mes,
+            pior_dia=pior["dia"].strftime("%d"),
+            pior_pct=float(pior["desconto_pct"]),
+        )
+        # Tabela: 1 linha por dia (mes corrente)
+        for _, r in cur_m.sort_values("dia").iterrows():
+            mod_tabela_dias.append(dict(
+                dia=r["dia"].strftime("%d"),
+                mwh=float(r["mwh_dia"]),
+                pld_medio=float(r["pld_avg"]),
+                pld_efetivo=float(r["preco_efetivo"]) if pd.notna(r["preco_efetivo"]) else 0.0,
+                delta_rs_mwh=float(r["preco_efetivo"] - r["pld_avg"])
+                    if pd.notna(r["preco_efetivo"]) else 0.0,
+                desconto_pct=float(r["desconto_pct"]) if pd.notna(r["desconto_pct"]) else 0.0,
+                receita_real=float(r["receita_real"]),
+            ))
+        print(f"\n[*] Resumo modulacao mes corrente "
+              f"({cur_first.strftime('%b/%Y')}): "
+              f"{n_dias} dias, {mwh_total:,.0f} MWh, "
+              f"PLD med {pld_medio_mes:.0f} vs efetivo {pld_efetivo_mes:.0f} "
+              f"R$/MWh, desconto {cur_pct:.2f}%, "
+              f"pior dia {pior['dia'].strftime('%d')} ({pior['desconto_pct']:.1f}%)")
 
     # ========== REN 1.030 ==========
     print("\n[*] Identificando eventos elegiveis REN 1.030/2022...")
@@ -3452,6 +3599,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
             cur_pct=cur_pct, cur_rs=cur_rs, cur_pld=cur_pld,
             delta_pp=delta_pp,
         ),
+        mod_summary=mod_summary,
+        mod_tabela_dias=mod_tabela_dias,
         trend=trend,
         met_ren=met_ren,
         eventos_top=eventos_top,
