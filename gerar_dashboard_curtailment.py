@@ -3349,6 +3349,38 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         print(f"  % com corte: {met_irr['pct_horas_corte_em_sol']:.1f}%")
         print(f"  CF em ceu limpo: {met_irr['cf_em_sol_pleno']:.2f}%")
 
+    # ========== DIAGNOSTICO HORARIO (DEBUG) ==========
+    # Imprime tabela hora_dia x (n_REL, n_CNF, n_ENE, sum_curt_filt, sum_curt_bruto, ghi)
+    print("\n[DEBUG] Distribuicao horaria de curtailment vs irradiancia:")
+    print("       hora_dia | n_REL+CNF+ENE+PAR | curt_filt(MWh) | curt_bruto(MWh) | ghi_avg(W/m2)")
+    dfd = mauriti.df.copy()
+    dfd["hora_dia"] = dfd["din_instante"].dt.hour
+    razoes_oficiais_dbg = ["REL", "CNF", "ENE", "PAR"]
+    dfd["e_classificado"] = dfd["cod_razaorestricao"].isin(razoes_oficiais_dbg)
+    dfd["curt_filt"] = dfd["curtailment_mwh"].where(dfd["e_classificado"], 0.0)
+    # GHI por hora_dia (perfil tipico)
+    ghi_perfil = {}
+    if not irradiancia.empty:
+        irr_d = irradiancia.copy()
+        irr_d["hora_dia"] = irr_d["hora"].dt.hour
+        ghi_perfil = irr_d.groupby("hora_dia")["ghi"].mean().to_dict()
+    for h in range(24):
+        sub = dfd[dfd["hora_dia"] == h]
+        n_class = int(sub["e_classificado"].sum())
+        sum_filt = float(sub["curt_filt"].sum())
+        sum_bruto = float(sub["curtailment_mwh"].sum())
+        ghi = ghi_perfil.get(h, 0.0)
+        print(f"         {h:>2}h    | {n_class:>17,} | {sum_filt:>14,.0f} | "
+              f"{sum_bruto:>15,.0f} | {ghi:>13.0f}")
+    # Sample din_instante pra verificar timezone
+    if not dfd.empty:
+        amostras = dfd["din_instante"].sample(min(3, len(dfd)), random_state=42)
+        print(f"\n[DEBUG] Amostra din_instante: {amostras.tolist()}")
+        print(f"[DEBUG] din_instante dtype: {dfd['din_instante'].dtype}")
+    if not irradiancia.empty:
+        amos_irr = irradiancia["hora"].sample(min(3, len(irradiancia)), random_state=42)
+        print(f"[DEBUG] Amostra NASA hora (apos UTC->BRT): {amos_irr.tolist()}")
+
     # ========== HEATMAP DOW ==========
     cf_dow = heatmap_dow_hora(mauriti.df)
 
