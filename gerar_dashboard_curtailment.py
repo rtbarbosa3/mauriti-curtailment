@@ -533,6 +533,62 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
     return df
 
 
+def _baixar_pld_dados_abertos(year: int, cfg: dict) -> Path | None:
+    """Tenta baixar PLD do portal Dados Abertos CCEE via API CKAN.
+    Retorna o caminho do arquivo baixado se sucesso, None se falha.
+
+    Estratégia:
+    1. Chama API CKAN: GET /api/3/action/package_show?id=pld_horario
+    2. Acha o resource com nome 'pld_horario_<year>'
+    3. Baixa o CSV do url do resource
+    4. Salva em pld_data/pld_horario_<year>.csv (sobrescrevendo se ja existe)
+
+    Vantagem da API CKAN: as URLs dos resources sao UUIDs estaveis. Se
+    a CCEE rotacionar o UUID, a API atualiza e o script continua funcionando.
+    """
+    api_url = ("https://dadosabertos.ccee.org.br/api/3/action/"
+               "package_show?id=pld_horario")
+    try:
+        r = requests.get(api_url, timeout=cfg["request_timeout"])
+        if r.status_code != 200:
+            print(f"  [!] API CKAN retornou {r.status_code} para {year}")
+            return None
+        data = r.json()
+        resources = data.get("result", {}).get("resources", [])
+        target = f"pld_horario_{year}"
+        for res in resources:
+            nome = (res.get("name") or "").lower().strip()
+            if nome.startswith(target.lower()):
+                csv_url = res.get("url")
+                if not csv_url:
+                    continue
+                # Baixa
+                csv_resp = requests.get(csv_url,
+                                          timeout=cfg["request_timeout"])
+                if csv_resp.status_code != 200:
+                    print(f"  [!] Download {target} HTTP {csv_resp.status_code}")
+                    continue
+                content = csv_resp.content
+                if len(content) < 1000:
+                    print(f"  [!] CSV {target} muito pequeno "
+                          f"({len(content)} bytes), descartando")
+                    continue
+                # Salva em pld_data/ (sobrescreve)
+                dest_dir = Path("./pld_data")
+                dest_dir.mkdir(exist_ok=True)
+                dest = dest_dir / f"pld_horario_{year}.csv"
+                dest.write_bytes(content)
+                print(f"  [OK] PLD {year} baixado de Dados Abertos CCEE "
+                      f"({len(content)/1024:.0f} KB) -> {dest}")
+                return dest
+        print(f"  [!] Resource 'pld_horario_{year}' nao encontrado na API")
+        return None
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"  [!] Erro baixando PLD {year} via Dados Abertos: "
+              f"{e.__class__.__name__}: {e}")
+        return None
+
+
 def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
                   submercado: str) -> pd.DataFrame:
     cache = _ensure_dir(Path(cfg["cache_dir"]) / "ccee")
@@ -543,9 +599,29 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
     frames = []
     anos_pendentes = list(anos)
 
-    # ========== ETAPA 1: lê PLD manual do repo (se disponivel) ==========
+    # ========== ETAPA 1: tenta baixar do portal Dados Abertos CCEE ==========
+    # Esse portal foi lancado em julho/2025 e publica diariamente. Substitui
+    # o site antigo da CCEE (que era bloqueado por Akamai em IPs de cloud).
+    print(f"       Tentando baixar de Dados Abertos CCEE para {anos_pendentes}...")
+    for ano in list(anos_pendentes):
+        # Para ano corrente, sempre re-baixa (dados sao atualizados diariamente)
+        # Para anos passados, so baixa se nao existe arquivo manual
+        manual_file = Path("./pld_data") / f"pld_horario_{ano}.csv"
+        ja_existe = manual_file.exists() and manual_file.stat().st_size > 1000
+        eh_ano_atual = (ano == today.year)
+        if ja_existe and not eh_ano_atual:
+            continue  # ano passado ja tem arquivo, nao precisa rebaixar
+        baixado = _baixar_pld_dados_abertos(ano, cfg)
+        if baixado:
+            try:
+                frames.append(_read_csv_robust(baixado))
+                anos_pendentes.remove(ano)
+            except Exception as e:
+                print(f"  [!] Erro lendo PLD {ano} baixado: {e}")
+
+    # ========== ETAPA 2: le PLD manual do repo (fallback ou ano passado) ==========
     manual_dir = Path("./pld_data")
-    if manual_dir.exists():
+    if manual_dir.exists() and anos_pendentes:
         print(f"       Procurando arquivos manuais em {manual_dir}/...")
         for ano in list(anos_pendentes):
             manual_file = manual_dir / f"pld_horario_{ano}.csv"
@@ -559,10 +635,9 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
                 except Exception as e:
                     print(f"  [!] Erro lendo manual {manual_file}: {e}")
 
-    # ========== ETAPA 2: download da CCEE (anos faltantes) ==========
+    # ========== ETAPA 3: ultimo recurso - portal CCEE legado ==========
     if anos_pendentes:
-        print(f"       Tentando CCEE download para {anos_pendentes}...")
-        print("       Iniciando sessao com warm-up no portal CCEE...")
+        print(f"       Ultimo recurso: portal CCEE legado para {anos_pendentes}...")
         session = _ccee_session()
         for ano in anos_pendentes:
             url = CCEE_PLD_URLS.get(ano)
@@ -573,12 +648,12 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
             if not _download_ccee(session, url, dest,
                                     cfg["request_timeout"], cfg["max_retries"],
                                     force=force):
-                print(f"  [!] Nao baixou PLD {ano} da CCEE "
+                print(f"  [!] Nao baixou PLD {ano} da CCEE legacy "
                       f"(provavel bloqueio IP)")
                 continue
             try:
                 frames.append(_read_csv_robust(dest))
-                print(f"  [OK] PLD {ano} baixado da CCEE")
+                print(f"  [OK] PLD {ano} baixado da CCEE legacy")
             except Exception as e:
                 print(f"  [!] Erro lendo PLD {ano}: {e}")
 
