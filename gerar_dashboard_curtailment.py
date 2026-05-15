@@ -2332,6 +2332,28 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   background:var(--panel);color:var(--ink);cursor:pointer}
 .ppa-hint{font-family:'IBM Plex Mono',monospace;font-size:10px;
   color:var(--muted);margin-top:6px;letter-spacing:0.05em}
+.ppa-add-second{margin:18px 0 0;padding:0;display:flex;align-items:center;gap:14px;
+  flex-wrap:wrap}
+.ppa-add-btn{background:transparent;border:1px dashed var(--rule);color:var(--accent);
+  cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;
+  text-transform:uppercase;font-weight:500;padding:8px 16px;border-radius:2px;
+  transition:all 0.15s}
+.ppa-add-btn:hover{background:var(--bg-alt);border-color:var(--accent);
+  border-style:solid}
+.ppa-add-btn.hidden{display:none}
+.ppa-add-hint{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+  color:var(--muted);font-style:italic}
+.ppa-second-row{margin:20px 0 0;padding:20px 22px;background:var(--bg);
+  border:1px solid var(--rule);border-radius:2px;position:relative}
+.ppa-second-head{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--rule)}
+.ppa-tag-secondary{display:inline-block;padding:4px 10px;background:var(--accent-today);
+  color:var(--bg);font-family:'IBM Plex Mono',monospace;font-size:10px;
+  letter-spacing:0.18em;text-transform:uppercase;font-weight:600;border-radius:2px}
+.ppa-remove-btn{background:transparent;border:none;color:var(--muted);
+  cursor:pointer;font-size:22px;line-height:1;padding:4px 10px;border-radius:2px;
+  transition:all 0.15s;font-family:'IBM Plex Sans',sans-serif}
+.ppa-remove-btn:hover{background:var(--bg-alt);color:var(--accent-today)}
 .ppa-results{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;
   margin:24px 0;padding:24px 0;
   border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
@@ -2853,6 +2875,49 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
             <option value="S" data-i18n="ppa_sub_s">S — Sul</option>
             <option value="N" data-i18n="ppa_sub_n">N — Norte</option>
           </select>
+        </div>
+      </div>
+
+      <!-- Toggle: add second PPA -->
+      <div class="ppa-add-second" id="ppa-add-second-wrap">
+        <button class="ppa-add-btn" id="ppa-add-btn" type="button">
+          <span data-i18n="ppa_add_second">+ Add second PPA</span>
+        </button>
+        <span class="ppa-add-hint" data-i18n="ppa_add_hint">Combine two contracts in different submarkets</span>
+      </div>
+
+      <!-- Second PPA inputs (hidden by default) -->
+      <div class="ppa-second-row" id="ppa-second-row" style="display:none">
+        <div class="ppa-second-head">
+          <span class="ppa-tag-secondary" data-i18n="ppa_second_label">2nd PPA</span>
+          <button class="ppa-remove-btn" id="ppa-remove-btn" type="button"
+                  data-i18n-title="ppa_remove_second" title="Remove second PPA">×</button>
+        </div>
+        <div class="ppa-inputs">
+          <div class="ppa-input-group">
+            <label data-i18n="ppa_price_label">PPA price (R$/MWh)</label>
+            <div class="ppa-input-row">
+              <input type="range" min="100" max="350" step="5" value="220" id="ppa-price-2">
+              <input type="number" min="50" max="500" step="1" value="220" id="ppa-price-2-num">
+            </div>
+          </div>
+          <div class="ppa-input-group">
+            <label data-i18n="ppa_volume_label">Contracted volume (MWh/month, flat)</label>
+            <div class="ppa-input-row">
+              <input type="range" min="0" max="50000" step="500" value="10000" id="ppa-volume-2">
+              <input type="number" min="0" max="200000" step="100" value="10000" id="ppa-volume-2-num">
+            </div>
+            <div class="ppa-hint" id="ppa-volume-2-hint"></div>
+          </div>
+          <div class="ppa-input-group">
+            <label data-i18n="ppa_sub_label">Delivery submarket</label>
+            <select id="ppa-submercado-2" class="ppa-select">
+              <option value="NE" data-i18n="ppa_sub_ne">NE — Nordeste (same as plant)</option>
+              <option value="SECO" data-i18n="ppa_sub_seco">SE/CO — Sudeste/Centro-Oeste</option>
+              <option value="S" selected data-i18n="ppa_sub_s">S — Sul</option>
+              <option value="N" data-i18n="ppa_sub_n">N — Norte</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -3459,6 +3524,10 @@ const I18N = {
     ppa_sub_seco: "SE/CO — Sudeste/Centro-Oeste",
     ppa_sub_s: "S — Sul",
     ppa_sub_n: "N — Norte",
+    ppa_add_second: "+ Adicionar 2º PPA",
+    ppa_add_hint: "Combine dois contratos em submercados diferentes",
+    ppa_second_label: "2º PPA",
+    ppa_remove_second: "Remover 2º PPA",
     ppa_kpi_mcp: "Receita real MCP (sem PPA)",
     ppa_kpi_mcp_hint: "Conforme observado no período",
     ppa_kpi_ppa: "Receita simulada (com PPA)",
@@ -3688,7 +3757,12 @@ const ppaState = {
   type: 'A',        // A = volume limited, B = all-take
   price: 200,        // R$/MWh
   volume: 20000,    // MWh/month (flat)
-  submercado: 'SECO' // submarket of delivery
+  submercado: 'SECO', // submarket of delivery
+  // Second PPA (optional, only Caso A supported)
+  secondActive: false,
+  price2: 220,
+  volume2: 10000,
+  submercado2: 'S'
 };
 
 function ppaPldSub(monthEntry, sub) {
@@ -3701,22 +3775,24 @@ function ppaPldSub(monthEntry, sub) {
 }
 
 function ppaCalc() {
-  const { price, volume, type, submercado } = ppaState;
+  const { price, volume, type, submercado,
+           secondActive, price2, volume2, submercado2 } = ppaState;
   let total_ppa = 0, total_mcp = 0, total_gen = 0;
   const rows = (MOD_MENSAL || []).map(m => {
     const pld_sub = ppaPldSub(m, submercado);
+    const pld_sub2 = secondActive ? ppaPldSub(m, submercado2) : 0;
     let ppa_rev;
     if (type === 'B') {
       // All-take: cliente leva toda a geracao ao preco fixo P
-      // (geracao real Mauriti × preco PPA)
+      // (geracao real Mauriti × preco PPA). No second PPA in this mode.
       ppa_rev = m.mwh_total * price;
     } else {
       // Volume limited flat horario:
-      // Receita total = receita_real_NE + volume × (P - PLD_medio_sub_entrega)
-      // O termo (P - PLD_sub) eh o spread financeiro do contrato flat.
-      // A geracao continua sendo vendida no spot NE (receita_real).
-      const extra = volume * (price - pld_sub);
-      ppa_rev = m.receita_real + extra;
+      // Receita total = receita_real + Σ_i [volume_i × (P_i - PLD_sub_i)]
+      // Cada PPA eh tratado independente (CCEE liquida horaria).
+      const extra1 = volume * (price - pld_sub);
+      const extra2 = secondActive ? volume2 * (price2 - pld_sub2) : 0;
+      ppa_rev = m.receita_real + extra1 + extra2;
     }
     total_ppa += ppa_rev;
     total_mcp += m.receita_real;
@@ -3725,16 +3801,19 @@ function ppaCalc() {
       month_label: m.month_label,
       gen: m.mwh_total,
       pld_sub: pld_sub,
+      pld_sub2: pld_sub2,
       mcp: m.receita_real,
       ppa: ppa_rev,
       delta: ppa_rev - m.receita_real
     };
   });
 
-  // Break-even price calculation
-  // For both types: solve for P where total_ppa(P) == total_mcp
+  // Break-even: so faz sentido quando ha um unico PPA
+  // (com 2 PPAs, ha infinitos pares (P1, P2) que empatam — sem solucao unica)
   let breakeven;
-  if (type === 'B') {
+  if (secondActive && type === 'A') {
+    breakeven = null;  // hidden in UI
+  } else if (type === 'B') {
     // All-take: total_ppa = sum(gen) × P, so P_be = total_mcp / total_gen
     breakeven = total_gen > 0 ? total_mcp / total_gen : 0;
   } else {
@@ -3779,7 +3858,7 @@ function ppaRender() {
   deltaEl.className = 'delta ' + (delta >= 0 ? 'good' : 'bad');
 
   document.getElementById('ppa-breakeven').textContent =
-    'R$ ' + Math.round(r.breakeven) + '/MWh';
+    r.breakeven === null ? '—' : 'R$ ' + Math.round(r.breakeven) + '/MWh';
 
   // Volume hint: MWmed equivalent (rough)
   const avgHoursMonth = MOD_MENSAL.length
@@ -3788,20 +3867,44 @@ function ppaRender() {
   const mwmed = ppaState.volume / avgHoursMonth;
   document.getElementById('ppa-volume-hint').textContent =
     `≈ ${mwmed.toFixed(1)} MWmed (avg)`;
+  // Second PPA hint
+  if (ppaState.secondActive) {
+    const mwmed2 = ppaState.volume2 / avgHoursMonth;
+    const h2 = document.getElementById('ppa-volume-2-hint');
+    if (h2) h2.textContent = `≈ ${mwmed2.toFixed(1)} MWmed (avg)`;
+  }
+
+  // Update break-even hint when 2 PPAs (no unique break-even)
+  const beHintEl = document.querySelector('#ppa-breakeven').parentElement
+    .querySelector('.hint');
+  if (beHintEl) {
+    if (r.breakeven === null) {
+      beHintEl.textContent = (document.body.dataset.lang === 'pt'
+        ? 'Indefinido com 2 PPAs (combinação)'
+        : 'Undefined with 2 PPAs (combination)');
+    } else {
+      const lang = document.body.dataset.lang || 'en';
+      beHintEl.textContent = (I18N && I18N[lang] && I18N[lang].ppa_kpi_breakeven_hint)
+        || 'Above this, PPA beats MCP';
+    }
+  }
 
   // Table
   const tbody = document.getElementById('ppa-monthly-rows');
+  const has2 = ppaState.secondActive && ppaState.type === 'A';
   tbody.innerHTML = r.rows.map(row => {
     const cls = row.delta >= 0 ? 'win' : 'lose';
     const s = row.delta >= 0 ? '+' : '';
-    const lang = document.body.dataset.lang || 'en';
     const better_pt = row.delta >= 0 ? 'PPA ↑' : 'MCP ↑';
-    const better_en = better_pt;
+    const pld2_cell = has2
+      ? `<td class="num">${Math.round(row.pld_sub2)}</td>`
+      : '';
     return `
       <tr class="${cls}">
         <td>${row.month_label}</td>
         <td class="num">${Math.round(row.gen).toLocaleString('en-US').replace(/,/g,' ')}</td>
         <td class="num">${Math.round(row.pld_sub)}</td>
+        ${pld2_cell}
         <td class="num">${(row.mcp/1e6).toFixed(2)}</td>
         <td class="num">${(row.ppa/1e6).toFixed(2)}</td>
         <td class="num delta">${s}${(row.delta/1e6).toFixed(2)}</td>
@@ -3809,6 +3912,22 @@ function ppaRender() {
       </tr>
     `;
   }).join('');
+
+  // Toggle visibility of extra PLD column in header
+  const thead = document.querySelector('.ppa-table thead tr');
+  if (thead) {
+    const existing = thead.querySelector('.pld-sub2-col');
+    if (has2 && !existing) {
+      const newTh = document.createElement('th');
+      newTh.className = 'num pld-sub2-col';
+      newTh.textContent = document.body.dataset.lang === 'pt'
+        ? 'PLD 2º (R$/MWh)' : '2nd PLD (R$/MWh)';
+      // Insert after first PLD column (4th th, index 3)
+      thead.insertBefore(newTh, thead.children[3]);
+    } else if (!has2 && existing) {
+      existing.remove();
+    }
+  }
 }
 
 function ppaInit() {
@@ -3835,6 +3954,9 @@ function ppaInit() {
   }
   syncPair('ppa-price', 'ppa-price-num', 'price');
   syncPair('ppa-volume', 'ppa-volume-num', 'volume');
+  // 2nd PPA sliders
+  syncPair('ppa-price-2', 'ppa-price-2-num', 'price2');
+  syncPair('ppa-volume-2', 'ppa-volume-2-num', 'volume2');
 
   // Submercado dropdown
   const sub = document.getElementById('ppa-submercado');
@@ -3844,8 +3966,17 @@ function ppaInit() {
       ppaRender();
     });
   }
+  const sub2 = document.getElementById('ppa-submercado-2');
+  if (sub2) {
+    sub2.addEventListener('change', () => {
+      ppaState.submercado2 = sub2.value;
+      ppaRender();
+    });
+  }
 
   // Toggle PPA type
+  const addWrap = document.getElementById('ppa-add-second-wrap');
+  const secondRow = document.getElementById('ppa-second-row');
   document.querySelectorAll('.ppa-type-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.ppa-type-btn').forEach(b => b.classList.remove('active'));
@@ -3857,9 +3988,39 @@ function ppaInit() {
         if (ppaState.type === 'B') volGroup.classList.add('hidden');
         else volGroup.classList.remove('hidden');
       }
+      // Hide "add second PPA" UI when type B (combination doesn't make sense)
+      if (addWrap) addWrap.style.display = ppaState.type === 'B' ? 'none' : 'flex';
+      if (ppaState.type === 'B' && ppaState.secondActive) {
+        // Auto-collapse second PPA when switching to all-take
+        ppaState.secondActive = false;
+        if (secondRow) secondRow.style.display = 'none';
+        const addBtn = document.getElementById('ppa-add-btn');
+        if (addBtn) addBtn.classList.remove('hidden');
+      }
       ppaRender();
     });
   });
+
+  // "+ Add second PPA" button
+  const addBtn = document.getElementById('ppa-add-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => {
+      ppaState.secondActive = true;
+      if (secondRow) secondRow.style.display = 'block';
+      addBtn.classList.add('hidden');
+      ppaRender();
+    });
+  }
+  // "× Remove second PPA" button
+  const removeBtn = document.getElementById('ppa-remove-btn');
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      ppaState.secondActive = false;
+      if (secondRow) secondRow.style.display = 'none';
+      if (addBtn) addBtn.classList.remove('hidden');
+      ppaRender();
+    });
+  }
 
   ppaRender();
 }
