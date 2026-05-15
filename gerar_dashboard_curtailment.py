@@ -1417,21 +1417,28 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
     else:
         next_first = date(cur_first.year, cur_first.month + 1, 1)
     days_in_month = (next_first - cur_first).days
-    all_days = [cur_first + timedelta(days=i) for i in range(days_in_month)]
+    # MELHORIA: cortar eixo X ate today + 1 buffer, igual ao mod tracker
+    days_to_show = min(today.day + 1, days_in_month)
+    all_days = [cur_first + timedelta(days=i) for i in range(days_to_show)]
 
     df = df_mauriti.copy()
     df["dia"] = df["din_instante"].dt.date
     cur = df[df["dia"] >= cur_first]
 
-    daily = (cur.groupby("dia").agg(estim=("estimada_mwh","sum"),
-                                       real=("geracao_mwh","sum"),
-                                       curt=("curtailment_mwh","sum"))
-                .reindex(all_days, fill_value=0).reset_index()
-                .rename(columns={"index":"dia"}))
-    daily["cf"] = (100 * daily["curt"] /
-                    daily["estim"].replace(0, np.nan)).fillna(0)
-    fut = daily["dia"] > today
-    daily.loc[fut, ["estim","real","curt","cf"]] = None
+    # Conserva calculo full do mes pra retornar 'daily' completo (usado por callers)
+    daily_full = (cur.groupby("dia").agg(estim=("estimada_mwh","sum"),
+                                            real=("geracao_mwh","sum"),
+                                            curt=("curtailment_mwh","sum"))
+                     .reindex([cur_first + timedelta(days=i)
+                                for i in range(days_in_month)], fill_value=0)
+                     .reset_index().rename(columns={"index":"dia"}))
+    daily_full["cf"] = (100 * daily_full["curt"] /
+                         daily_full["estim"].replace(0, np.nan)).fillna(0)
+    fut_full = daily_full["dia"] > today
+    daily_full.loc[fut_full, ["estim","real","curt","cf"]] = None
+
+    # Subset para o grafico (so dias decorridos + buffer)
+    daily = daily_full.iloc[:days_to_show].copy()
 
     # CF% medio do trimestre fechado anterior
     ref_start = cur_first - timedelta(days=90)
@@ -1443,43 +1450,165 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
     else:
         ref_cf = None
 
-    x = [d.strftime("%d") for d in daily["dia"]]
+    # Labels do eixo X: numero do dia + dia da semana abreviado
+    dow_short = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+    x_labels = []
+    for d in daily["dia"]:
+        if pd.isna(d):
+            x_labels.append("")
+        else:
+            dow_idx = d.weekday()
+            # Weekend em bold sutil
+            if dow_idx >= 5:
+                x_labels.append(f"<b>{d.strftime('%d')}</b><br>"
+                                f"<span style='font-size:9px;color:#857d72'>"
+                                f"<b>{dow_short[dow_idx]}</b></span>")
+            else:
+                x_labels.append(f"{d.strftime('%d')}<br>"
+                                f"<span style='font-size:9px;color:#857d72'>"
+                                f"{dow_short[dow_idx]}</span>")
+
+    # Pre-computa percentuais pra tooltip rico (Realizada/Cortada/Esperada)
+    pct_real = [(100 * r / e) if (e is not None and e > 0)
+                else None for r, e in zip(daily["real"], daily["estim"])]
+    pct_curt = [(100 * c / e) if (e is not None and e > 0)
+                else None for c, e in zip(daily["curt"], daily["estim"])]
+    delta_ref = ([cf - ref_cf if (cf is not None and ref_cf is not None) else None
+                  for cf in daily["cf"]] if ref_cf is not None
+                 else [None] * len(daily))
+
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=x, y=daily["real"], name="Geracao realizada (MWh)",
+
+    # ---------- ZONAS DE SEVERIDADE NO Y2 (CF%) ----------
+    if len(x_labels) > 0:
+        x_left, x_right = -0.5, len(x_labels) - 0.5
+        # Zona OK: 0% a 15% (verde claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=0, y1=15,
+                       fillcolor="rgba(45,90,61,0.04)",
+                       line=dict(width=0), layer="below")
+        # Zona ATENCAO: 15% a 30% (amarelo claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=15, y1=30,
+                       fillcolor="rgba(217,140,30,0.05)",
+                       line=dict(width=0), layer="below")
+        # Zona CRITICA: > 30% (vermelho claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=30, y1=100,
+                       fillcolor="rgba(217,46,15,0.05)",
+                       line=dict(width=0), layer="below")
+
+    # ---------- BARRAS (realizada + curtailment, stacked) ----------
+    customdata_real = list(zip(daily["estim"], pct_real, delta_ref))
+    fig.add_trace(go.Bar(x=x_labels, y=daily["real"], name="Geracao realizada (MWh)",
         marker=dict(color=EL["ink_2"], line=dict(width=0)),
-        hovertemplate="<b>%{x}</b><br>Realizada: %{y:,.1f} MWh<extra></extra>"))
-    fig.add_trace(go.Bar(x=x, y=daily["curt"], name="Curtailment (MWh)",
+        customdata=customdata_real,
+        hovertemplate="Realizada: <b>%{y:,.0f}</b> MWh "
+                      "(%{customdata[1]:.1f}% do esperado)<extra></extra>"))
+    customdata_curt = list(zip(daily["estim"], pct_curt, daily["cf"]))
+    fig.add_trace(go.Bar(x=x_labels, y=daily["curt"], name="Curtailment (MWh)",
         marker=dict(color=EL["accent"], line=dict(width=0)),
-        hovertemplate="<b>%{x}</b><br>Cortado: %{y:,.1f} MWh<extra></extra>"))
-    fig.add_trace(go.Scatter(x=x, y=daily["cf"], name="CF% do dia",
+        customdata=customdata_curt,
+        hovertemplate="Cortada: <b>%{y:,.0f}</b> MWh "
+                      "(%{customdata[1]:.1f}% do esperado)<extra></extra>"))
+
+    # ---------- LINHA CF% ----------
+    fig.add_trace(go.Scatter(x=x_labels, y=daily["cf"], name="CF% do dia",
         mode="lines+markers", yaxis="y2",
         line=dict(color=EL["accent_today"], width=2.5),
         marker=dict(size=8, color=EL["accent_today"],
                      line=dict(color=EL["panel"], width=1.5)),
-        hovertemplate="<b>Dia %{x}</b><br>CF: %{y:.2f}%<extra></extra>"))
+        customdata=delta_ref,
+        hovertemplate="CF: <b>%{y:.2f}%</b>"
+                      "<extra></extra>"))
+
+    # ---------- MARKER DIA ATUAL ----------
+    today_str = today.strftime("%d")
+    # Encontra index do today_str no x_labels (precisa procurar nos labels que comecam com today_str)
+    idx_today = None
+    for i, lab in enumerate(x_labels):
+        if lab.startswith(today_str) or lab.startswith(f"<b>{today_str}"):
+            idx_today = i
+            break
+    if idx_today is not None:
+        cf_today = daily["cf"].iloc[idx_today]
+        if pd.notna(cf_today):
+            fig.add_trace(go.Scatter(
+                x=[x_labels[idx_today]], y=[cf_today],
+                mode="markers+text", yaxis="y2",
+                marker=dict(size=18, color=EL["accent_today"],
+                             line=dict(color="#1a1a1a", width=2),
+                             symbol="circle"),
+                text=["today"],
+                textposition="top center",
+                textfont=dict(family="'IBM Plex Mono'", size=10,
+                              color="#1a1a1a"),
+                name="today",
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+    # ---------- ANNOTATION PIOR DIA ----------
+    cf_validos = daily["cf"].dropna()
+    if len(cf_validos) > 0:
+        idx_pior = cf_validos.idxmax()
+        pior_cf = daily.loc[idx_pior, "cf"]
+        pior_dia = daily.loc[idx_pior, "dia"]
+        if pior_cf >= 25 and idx_pior != idx_today:  # so destaca se ruim e nao for hoje
+            fig.add_annotation(
+                x=x_labels[idx_pior], y=pior_cf,
+                yref="y2",
+                text=f"<b>worst: day {pior_dia.day} · {pior_cf:.1f}%</b>",
+                showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=1.5,
+                arrowcolor=EL["accent_today"],
+                ax=-50, ay=-40,
+                bgcolor="#fafaf6", borderpad=6, borderwidth=1,
+                bordercolor=EL["accent_today"],
+                font=dict(family="'IBM Plex Mono'", size=10,
+                          color=EL["accent_today"]),
+            )
+
+    # ---------- LINHA CF MEDIO TRIMESTRE (mais visivel) ----------
     if ref_cf is not None:
         fig.add_hline(y=ref_cf, yref="y2",
-            line=dict(color=EL["neutral"], width=1.2, dash="dot"),
-            annotation_text=f"  CF medio trimestre: {ref_cf:.1f}%",
+            line=dict(color=EL["neutral"], width=1.5, dash="dash"),
+            annotation_text=f"  prior-quarter avg: {ref_cf:.1f}%",
             annotation_position="top right",
             annotation=dict(font=dict(family="'IBM Plex Mono',monospace",
-                                       size=10, color=EL["neutral"])))
+                                       size=10, color=EL["neutral"]),
+                              bgcolor="rgba(250,250,246,0.85)",
+                              borderpad=3))
+
+    # Subtitle dinamico
+    mes_capitalized = cur_first.strftime("%B/%Y")  # ex: "May/2026"
+    subtitle = (f"<span style='font-size:11px;color:#857d72'>"
+                f"{today.day} of {days_in_month} days elapsed "
+                f"· stacked = expected gen = realized + curtailed</span>")
+
     lay = dict(LAY); lay.update(
-        title=ed_title(
-            f"Mauriti — {cur_first.strftime('%B/%Y').lower()}  ·  "
-            "realizada vs cortada por dia", 20),
+        title=dict(
+            text=(f"<span style='font-size:20px;font-family:Fraunces,serif;"
+                  f"color:#1a1715'>Mauriti — {mes_capitalized}  ·  "
+                  f"realized vs curtailed per day</span>"
+                  f"<br>{subtitle}"),
+            x=0.02, xanchor="left", y=0.97
+        ),
         barmode="stack",
-        xaxis=dict(title=f"dia (1 a {days_in_month})", gridcolor=EL["border"]),
-        yaxis=dict(title="MWh / dia", gridcolor=EL["border"]),
-        yaxis2=dict(title="CF% do dia", overlaying="y", side="right",
+        xaxis=dict(title="", gridcolor=EL["border"],
+                    tickfont=dict(family="'IBM Plex Mono',monospace", size=10)),
+        yaxis=dict(title="MWh / day", gridcolor=EL["border"]),
+        yaxis2=dict(title="CF% of the day", overlaying="y", side="right",
                      showgrid=False, color=EL["accent_today"],
-                     ticksuffix="%", rangemode="tozero"),
-        hovermode="x unified", height=460, bargap=0.30,
-        legend=dict(orientation="h", y=-0.18,
+                     ticksuffix="%", rangemode="tozero",
+                     range=[0, max(60, float(cf_validos.max())+10
+                                    if len(cf_validos) > 0 else 60)]),
+        hovermode="x unified", height=480, bargap=0.30,
+        margin=dict(l=70, r=110, t=90, b=60),
+        legend=dict(orientation="h", y=-0.20,
                      font=dict(family="'IBM Plex Mono',monospace", size=11)),
     )
     fig.update_layout(**lay)
-    return fig, daily, ref_cf, days_in_month
+    return fig, daily_full, ref_cf, days_in_month
 
 
 def g_serie(df, titulo):
@@ -2405,6 +2534,61 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .trend-cell .baseline{font-family:'IBM Plex Mono',monospace;font-size:9px;
   color:var(--muted);opacity:0.7;letter-spacing:0.05em;margin-top:4px;
   border-top:1px dashed var(--rule);padding-top:4px}
+
+/* =========================== BENCHMARK TAB =========================== */
+.bench-selector{display:flex;align-items:center;gap:18px;margin:24px 0 32px;
+  padding:20px 24px;background:var(--bg-alt);border:1px solid var(--rule);
+  border-radius:2px;flex-wrap:wrap}
+.bench-selector label{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--ink);letter-spacing:0.16em;text-transform:uppercase;font-weight:500}
+.bench-select{padding:10px 14px;border:1px solid var(--rule);
+  background:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:13px;
+  color:var(--ink);border-radius:2px;min-width:280px;cursor:pointer}
+.bench-select:focus{outline:2px solid var(--accent-today);outline-offset:1px}
+.bench-meta{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--muted);letter-spacing:0.04em;font-style:italic}
+.bench-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;
+  margin:0 0 24px}
+@media(max-width:900px){.bench-cards{grid-template-columns:1fr}}
+.bench-card{background:var(--panel);border:1px solid var(--rule);
+  border-radius:2px;padding:22px 24px;display:flex;flex-direction:column;gap:14px}
+.bench-card-mauriti{border-left:3px solid var(--accent)}
+.bench-card-peer{border-left:3px solid var(--neutral)}
+.bench-card-diff{border-left:3px solid var(--ink);background:var(--bg-alt)}
+.bench-card-label{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  font-weight:600;letter-spacing:0.22em;text-transform:uppercase;
+  color:var(--ink)}
+.bench-card-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.04em;margin-top:-8px}
+.bench-rows{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.bench-row{display:flex;justify-content:space-between;align-items:baseline;
+  border-bottom:1px dotted var(--rule);padding-bottom:8px}
+.bench-row:last-child{border-bottom:none;padding-bottom:0}
+.bench-row .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.1em;text-transform:uppercase}
+.bench-row .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:22px;line-height:1;letter-spacing:-0.01em;color:var(--ink);
+  font-variation-settings:"opsz" 72}
+.bench-row .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:11px;
+  color:var(--muted);font-weight:400;margin-left:3px}
+/* Semantic colour for diff values: red = Mauriti worse, green = better */
+.bench-row.diff-worse .val{color:var(--accent-today)}
+.bench-row.diff-better .val{color:var(--ok)}
+.bench-row.diff-neutral .val{color:var(--muted)}
+
+.bench-table-wrap{margin:24px 0 0}
+.bench-table-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:17px;margin:0 0 8px;color:var(--ink)}
+.bench-table-desc{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+  line-height:1.55;color:var(--muted);margin:0 0 14px;max-width:780px}
+.bench-table tbody tr{cursor:pointer;transition:background 0.15s}
+.bench-table tbody tr:hover{background:var(--bg-alt)}
+.bench-table tbody tr.active-bench{background:rgba(168,68,47,0.08);
+  border-left:3px solid var(--accent)}
+.bench-table tbody tr.is-mauriti{background:rgba(168,68,47,0.04);
+  font-weight:500}
+.bench-table tbody tr.is-mauriti td:first-child::before{content:"★ ";
+  color:var(--accent)}
 .trend-banner{margin:-24px 0 32px;padding:14px 20px;border-radius:2px;
   font-family:'IBM Plex Mono',monospace;font-size:11px;
   letter-spacing:0.12em;text-transform:uppercase;font-weight:500;
@@ -2705,6 +2889,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <button class="tab" data-tab="mod" data-i18n="tab_mod">Modulation effect</button>
     <button class="tab" data-tab="ren" data-i18n="tab_ren">REN 1.030 tracker</button>
     <button class="tab" data-tab="solar" data-i18n="tab_solar">Solar resource</button>
+    <button class="tab" data-tab="bench" data-i18n="tab_bench">Benchmark</button>
   </div>
 
   <!-- ============================================================ -->
@@ -3634,6 +3819,78 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
   </div><!-- /tab solar -->
 
+  <!-- ============================================================ -->
+  <!-- TAB: BENCHMARK BUILDER                                        -->
+  <!-- ============================================================ -->
+  <div class="tab-pane" data-tab="bench">
+
+    <div class="hero">
+      <div class="kicker" data-i18n="bench_kicker">CE peer comparison &middot; pre-defined groups</div>
+      <h1>
+        <span data-i18n="bench_h1_a">How does Mauriti compare</span>
+        <em data-i18n="bench_h1_b">against its peers?</em>
+      </h1>
+      <p class="lede" data-i18n="bench_lede">Pick any of the 7 pre-defined peer groups in CE
+      and see Mauriti's KPIs against that benchmark, side by side. Use the
+      dropdown to switch between groups and see all metrics update instantly.</p>
+    </div>
+
+    <!-- Group selector -->
+    <div class="bench-selector">
+      <label data-i18n="bench_select_label">Compare Mauriti against:</label>
+      <select id="bench-group" class="bench-select">
+        <!-- options inserted by JS from BENCH_KPIS -->
+      </select>
+      <span class="bench-meta" id="bench-meta"></span>
+    </div>
+
+    <!-- 3 KPI cards: Mauriti / Peer / Diff -->
+    <div class="bench-cards">
+      <div class="bench-card bench-card-mauriti">
+        <div class="bench-card-label" data-i18n="bench_card_mauriti">MAURITI</div>
+        <div class="bench-card-sub" id="bench-mauriti-sub">9 UFVs</div>
+        <div class="bench-rows" id="bench-mauriti-rows"></div>
+      </div>
+      <div class="bench-card bench-card-peer">
+        <div class="bench-card-label" id="bench-peer-label">PEER</div>
+        <div class="bench-card-sub" id="bench-peer-sub"></div>
+        <div class="bench-rows" id="bench-peer-rows"></div>
+      </div>
+      <div class="bench-card bench-card-diff">
+        <div class="bench-card-label" data-i18n="bench_card_diff">DIFFERENCE</div>
+        <div class="bench-card-sub" data-i18n="bench_card_diff_sub">Mauriti − Peer</div>
+        <div class="bench-rows" id="bench-diff-rows"></div>
+      </div>
+    </div>
+
+    <!-- Comparison chart (CF, Curt MWh, Modulation %) -->
+    <div id="g_bench_compare" style="width:100%;height:380px;margin:32px 0"></div>
+
+    <!-- All groups context table -->
+    <div class="bench-table-wrap">
+      <h4 data-i18n="bench_table_title">All 7 peer groups — KPIs at a glance</h4>
+      <p class="bench-table-desc" data-i18n="bench_table_desc">
+        Reference table with all peer groups including Mauriti.
+        Click any row to make that group the active comparison above.</p>
+      <div class="events-table-wrap">
+        <table class="events-table bench-table">
+          <thead>
+            <tr>
+              <th data-i18n="bench_th_group">Group</th>
+              <th data-i18n="bench_th_source">Source</th>
+              <th class="num" data-i18n="bench_th_n_plants"># plants</th>
+              <th class="num" data-i18n="bench_th_gen">Total gen (GWh)</th>
+              <th class="num" data-i18n="bench_th_curt">Curt (GWh)</th>
+              <th class="num" data-i18n="bench_th_cf">CF (%)</th>
+            </tr>
+          </thead>
+          <tbody id="bench-all-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /tab bench -->
+
   <!-- Glossary -->
   <details class="glossary">
     <summary data-i18n="glossary_title">Glossary &amp; technical notes</summary>
@@ -3708,6 +3965,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 <script>
 const FIGS = {{ figs_json|safe }};
 const MOD_MENSAL = {{ mod_mensal_json|safe }};
+const BENCH_KPIS = {{ bench_kpis_json|safe }};
 
 // I18N dictionary
 const I18N = {
@@ -3719,6 +3977,23 @@ const I18N = {
     tab_mod: "Efeito Modulação",
     tab_ren: "Tracker REN 1.030",
     tab_solar: "Recurso Solar",
+    tab_bench: "Benchmark",
+    bench_kicker: "Comparação peer no CE · grupos pré-definidos",
+    bench_h1_a: "Como Mauriti se compara",
+    bench_h1_b: "contra seus peers?",
+    bench_lede: "Escolha qualquer um dos 7 grupos peer pré-definidos no CE e veja os KPIs de Mauriti contra esse benchmark, lado a lado. Use o dropdown para alternar entre grupos e ver todas as métricas atualizarem instantaneamente.",
+    bench_select_label: "Comparar Mauriti com:",
+    bench_card_mauriti: "MAURITI",
+    bench_card_diff: "DIFERENÇA",
+    bench_card_diff_sub: "Mauriti − Peer",
+    bench_table_title: "Todos os 7 grupos peer — KPIs num só lugar",
+    bench_table_desc: "Tabela referência com todos os grupos peer incluindo Mauriti. Clique em qualquer linha para tornar aquele grupo a comparação ativa acima.",
+    bench_th_group: "Grupo",
+    bench_th_source: "Fonte",
+    bench_th_n_plants: "# usinas",
+    bench_th_gen: "Geração total (GWh)",
+    bench_th_curt: "Cortado (GWh)",
+    bench_th_cf: "CF (%)",
     period: "Período",
     of: "de",
     of_lower: "de",
@@ -4506,6 +4781,209 @@ ppaInit();
 
 // Re-render PPA table when language toggle is fired
 window.addEventListener('mauriti-lang-changed', ppaRender);
+
+// ============================================================
+// BENCHMARK BUILDER (Tab: bench)
+// ============================================================
+const benchState = { activeId: null };
+
+function _fmtGwh(mwh) { return (mwh / 1000).toFixed(1); }
+function _fmtMrs(rs) { return (rs / 1e6).toFixed(2); }
+function _fmtPct(v) { return v.toFixed(2); }
+
+function benchPopulateDropdown() {
+  const sel = document.getElementById('bench-group');
+  if (!sel || !BENCH_KPIS || BENCH_KPIS.length === 0) return;
+  // Exclui Mauriti das opcoes (eh sempre a base)
+  const peers = BENCH_KPIS.filter(g => !g.is_mauriti);
+  sel.innerHTML = peers.map(g =>
+    `<option value="${g.id}">${g.label} (${g.fonte} · ${g.n_plants} plants)</option>`
+  ).join('');
+  if (peers.length > 0) {
+    benchState.activeId = peers[0].id;
+    sel.value = benchState.activeId;
+  }
+}
+
+function benchRender() {
+  if (!BENCH_KPIS || BENCH_KPIS.length === 0) return;
+  const lang = document.body.dataset.lang || 'en';
+  const mauriti = BENCH_KPIS.find(g => g.is_mauriti);
+  const peer = BENCH_KPIS.find(g => g.id === benchState.activeId);
+  if (!mauriti || !peer) return;
+
+  const I = (lang === 'pt')
+    ? {cf:'CF curtailment',gen:'Geração',curt:'Cortado',plants:'usinas',
+       gwh:'GWh',pp:'pp',better:'PPA ↑',worse:'pior',betterAdj:'melhor'}
+    : {cf:'Curtailment CF',gen:'Generation',curt:'Curtailed',plants:'plants',
+       gwh:'GWh',pp:'pp',better:'better',worse:'worse',betterAdj:'better'};
+
+  // Helper to build a key/val row
+  function row(key, val, unit, extraCls) {
+    extraCls = extraCls || '';
+    return `
+      <div class="bench-row ${extraCls}">
+        <span class="key">${key}</span>
+        <span class="val">${val}<span class="unit">${unit||''}</span></span>
+      </div>`;
+  }
+
+  // Mauriti card
+  document.getElementById('bench-mauriti-sub').textContent =
+    `${mauriti.n_plants} ${I.plants}`;
+  document.getElementById('bench-mauriti-rows').innerHTML =
+    row(I.cf, _fmtPct(mauriti.cf), '%') +
+    row(I.gen, _fmtGwh(mauriti.mwh_gen), ' ' + I.gwh) +
+    row(I.curt, _fmtGwh(mauriti.mwh_curt), ' ' + I.gwh);
+
+  // Peer card
+  document.getElementById('bench-peer-label').textContent = peer.label.toUpperCase();
+  document.getElementById('bench-peer-sub').textContent =
+    `${peer.fonte} · ${peer.n_plants} ${I.plants}`;
+  document.getElementById('bench-peer-rows').innerHTML =
+    row(I.cf, _fmtPct(peer.cf), '%') +
+    row(I.gen, _fmtGwh(peer.mwh_gen), ' ' + I.gwh) +
+    row(I.curt, _fmtGwh(peer.mwh_curt), ' ' + I.gwh);
+
+  // Diff card (Mauriti - Peer)
+  // Para CF e curtailment, Mauriti MAIOR = pior; pra geracao, MAIOR = melhor.
+  const dCf = mauriti.cf - peer.cf;
+  const dGen = mauriti.mwh_gen - peer.mwh_gen;
+  const dCurt = mauriti.mwh_curt - peer.mwh_curt;
+  const cfCls = dCf > 0.5 ? 'diff-worse' : (dCf < -0.5 ? 'diff-better' : 'diff-neutral');
+  const curtCls = dCurt > 0 ? 'diff-worse' : (dCurt < 0 ? 'diff-better' : 'diff-neutral');
+  const genCls = 'diff-neutral';  // diff de geracao nao tem semantica (depende de escala)
+  document.getElementById('bench-diff-rows').innerHTML =
+    row(I.cf, (dCf >= 0 ? '+' : '') + _fmtPct(dCf), ' ' + I.pp, cfCls) +
+    row(I.gen, (dGen >= 0 ? '+' : '') + _fmtGwh(dGen), ' ' + I.gwh, genCls) +
+    row(I.curt, (dCurt >= 0 ? '+' : '') + _fmtGwh(dCurt), ' ' + I.gwh, curtCls);
+
+  // Meta info acima
+  const meta = document.getElementById('bench-meta');
+  if (meta) {
+    meta.textContent = (lang === 'pt'
+      ? `${peer.fonte} · ${peer.n_plants} usinas`
+      : `${peer.fonte} · ${peer.n_plants} plants`);
+  }
+
+  // Comparison chart: 3 metricas (CF%, Curt GWh, Gen GWh) lado a lado
+  benchRenderChart(mauriti, peer, lang);
+
+  // All groups table
+  benchRenderTable(lang);
+}
+
+function benchRenderChart(mauriti, peer, lang) {
+  const el = document.getElementById('g_bench_compare');
+  if (!el) return;
+  const labels = (lang === 'pt')
+    ? ['CF curtailment (%)', 'Geração (GWh)', 'Cortado (GWh)']
+    : ['Curtailment CF (%)', 'Generation (GWh)', 'Curtailed (GWh)'];
+
+  const trace1 = {
+    type: 'bar', name: 'Mauriti',
+    x: labels,
+    y: [mauriti.cf, mauriti.mwh_gen/1000, mauriti.mwh_curt/1000],
+    marker: { color: '#a8442f' },
+    text: [_fmtPct(mauriti.cf) + '%',
+           _fmtGwh(mauriti.mwh_gen) + ' GWh',
+           _fmtGwh(mauriti.mwh_curt) + ' GWh'],
+    textposition: 'outside',
+    textfont: {family: 'IBM Plex Mono', size: 11},
+    hovertemplate: '<b>Mauriti</b><br>%{x}: %{y:.2f}<extra></extra>',
+  };
+  const trace2 = {
+    type: 'bar', name: peer.label,
+    x: labels,
+    y: [peer.cf, peer.mwh_gen/1000, peer.mwh_curt/1000],
+    marker: { color: '#5b6b7d' },
+    text: [_fmtPct(peer.cf) + '%',
+           _fmtGwh(peer.mwh_gen) + ' GWh',
+           _fmtGwh(peer.mwh_curt) + ' GWh'],
+    textposition: 'outside',
+    textfont: {family: 'IBM Plex Mono', size: 11},
+    hovertemplate: `<b>${peer.label}</b><br>%{x}: %{y:.2f}<extra></extra>`,
+  };
+  const layout = {
+    title: {
+      text: (lang === 'pt'
+        ? `Comparação direta — Mauriti vs ${peer.label}`
+        : `Direct comparison — Mauriti vs ${peer.label}`),
+      font: {family: 'Fraunces, serif', size: 18, color: '#1a1a1a'},
+      x: 0.02, xanchor: 'left', y: 0.95
+    },
+    barmode: 'group',
+    bargap: 0.3, bargroupgap: 0.15,
+    xaxis: {tickfont: {family: 'IBM Plex Sans', size: 12}},
+    yaxis: {title: '', gridcolor: '#e8e2d4',
+            tickfont: {family: 'IBM Plex Mono', size: 10}},
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    margin: {l: 60, r: 30, t: 60, b: 60},
+    legend: {orientation: 'h', x: 0.5, y: -0.15, xanchor: 'center',
+             font: {family: 'IBM Plex Mono', size: 11}},
+    height: 380,
+  };
+  Plotly.react(el, [trace1, trace2], layout, {
+    responsive: true, displaylogo: false,
+    modeBarButtonsToRemove: ['lasso2d','select2d','autoScale2d',
+                              'zoomIn2d','zoomOut2d']
+  });
+}
+
+function benchRenderTable(lang) {
+  const tbody = document.getElementById('bench-all-rows');
+  if (!tbody) return;
+  const rows = BENCH_KPIS.slice().sort((a, b) => {
+    if (a.is_mauriti) return -1;
+    if (b.is_mauriti) return 1;
+    return b.cf - a.cf;  // peers ordenados por CF descendente
+  });
+  tbody.innerHTML = rows.map(g => {
+    const cls = (g.is_mauriti ? 'is-mauriti' : '') +
+                (g.id === benchState.activeId ? ' active-bench' : '');
+    return `
+      <tr class="${cls}" data-bench-id="${g.id}"
+          ${g.is_mauriti ? '' : 'role="button"'}>
+        <td>${g.label}</td>
+        <td>${g.fonte}</td>
+        <td class="num">${g.n_plants}</td>
+        <td class="num">${_fmtGwh(g.mwh_gen)}</td>
+        <td class="num">${_fmtGwh(g.mwh_curt)}</td>
+        <td class="num">${_fmtPct(g.cf)}</td>
+      </tr>
+    `;
+  }).join('');
+  // Attach click handler to each peer row
+  tbody.querySelectorAll('tr[data-bench-id]').forEach(tr => {
+    if (tr.classList.contains('is-mauriti')) return;
+    tr.addEventListener('click', () => {
+      benchState.activeId = tr.dataset.benchId;
+      const sel = document.getElementById('bench-group');
+      if (sel) sel.value = benchState.activeId;
+      benchRender();
+    });
+  });
+}
+
+function benchInit() {
+  if (!BENCH_KPIS || BENCH_KPIS.length === 0) {
+    console.warn('Benchmark: no data available');
+    return;
+  }
+  benchPopulateDropdown();
+  const sel = document.getElementById('bench-group');
+  if (sel) {
+    sel.addEventListener('change', () => {
+      benchState.activeId = sel.value;
+      benchRender();
+    });
+  }
+  benchRender();
+}
+
+benchInit();
+window.addEventListener('mauriti-lang-changed', benchRender);
 </script>
 
 </body>
@@ -4527,6 +5005,46 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
     met_b = metricas(bench_df) if not bench_df.empty else {"vazio": True,
                                                              "n_usinas": 0,
                                                              "curtailment_factor": 0}
+
+    # ========== KPIS POR GRUPO PARA BENCHMARK BUILDER ==========
+    # Calcula CF, MWh gen, MWh curt para cada grupo individual + Mauriti.
+    # Estrutura sera exportada como JSON pro JS interativo da aba Benchmark.
+    def _slug(s: str) -> str:
+        return (str(s).lower().strip().replace(" ", "_")
+                .replace("/", "_").replace("-", "_")
+                .replace("ç", "c").replace("ã", "a").replace("á", "a")
+                .replace("é", "e").replace("í", "i").replace("ó", "o")
+                .replace("ú", "u").replace("ô", "o").replace("â", "a"))
+
+    bench_kpis_data = []
+    # Mauriti como entrada destacada
+    bench_kpis_data.append({
+        "id": "mauriti",
+        "label": "Mauriti",
+        "is_mauriti": True,
+        "fonte": "UFV",
+        "n_plants": int(met_m.get("n_usinas", 0)),
+        "mwh_gen": float(met_m.get("total_estimada_mwh", 0)),
+        "mwh_curt": float(met_m.get("total_curt_mwh", 0)),
+        "cf": float(met_m.get("curtailment_factor", 0)),
+        "receita_perdida": float(met_m.get("receita_perdida", 0)),
+    })
+    # Cada grupo do benchmark
+    for g in grupos:
+        met_g = metricas(g.df)
+        bench_kpis_data.append({
+            "id": _slug(g.label),
+            "label": g.label,
+            "is_mauriti": False,
+            "fonte": g.fonte,
+            "n_plants": int(met_g.get("n_usinas", 0)),
+            "mwh_gen": float(met_g.get("total_estimada_mwh", 0)),
+            "mwh_curt": float(met_g.get("total_curt_mwh", 0)),
+            "cf": float(met_g.get("curtailment_factor", 0)),
+            "receita_perdida": float(met_g.get("receita_perdida", 0)),
+        })
+    print(f"  Benchmark KPIs: {len(bench_kpis_data)} grupos "
+          f"(incluindo Mauriti)")
 
     fig_tracker, daily_t, ref_cf, days_in_month = g_tracker(mauriti.df, today)
     done = daily_t.dropna(subset=["estim"])
@@ -4844,6 +5362,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         mod_summary=mod_summary,
         mod_tabela_dias=mod_tabela_dias,
         mod_mensal_json=json.dumps(mod_mensal_data, default=str),
+        bench_kpis_json=json.dumps(bench_kpis_data, default=str),
         trend=trend,
         met_ren=met_ren,
         eventos_top=eventos_top,
