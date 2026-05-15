@@ -718,11 +718,53 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
     pld["pld"] = pd.to_numeric(pld["pld"].astype(str).str.replace(",", "."),
                                 errors="coerce")
     pld = pld.dropna(subset=["hora", "pld"])
+
+    # ===== NEW (v5.4): agregado mensal por submercado pro simulador PPA =====
+    # Antes de filtrar pelo submercado configurado, calcula agregado mensal
+    # de TODOS os submercados pra usar no simulador PPA (atribuido como attrs)
+    pld_filtrado_periodo = pld[
+        (pld["hora"] >= pd.Timestamp(dt_ini)) &
+        (pld["hora"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1))
+    ].copy()
+    if not pld_filtrado_periodo.empty:
+        pld_filtrado_periodo["sub_norm"] = (
+            pld_filtrado_periodo["sub"].astype(str).str.upper().str.strip()
+        )
+        # Normalizacao de nomes de submercado
+        sub_map = {
+            "NORDESTE": "NE", "NE": "NE",
+            "SUDESTE/CENTROOESTE": "SECO", "SUDESTE": "SECO",
+            "SECO": "SECO", "SE/CO": "SECO", "SE": "SECO",
+            "SUL": "S", "S": "S",
+            "NORTE": "N", "N": "N",
+        }
+        pld_filtrado_periodo["sub_code"] = (
+            pld_filtrado_periodo["sub_norm"].map(sub_map)
+            .fillna(pld_filtrado_periodo["sub_norm"])
+        )
+        pld_filtrado_periodo["mes"] = (
+            pld_filtrado_periodo["hora"].dt.to_period("M").dt.to_timestamp()
+        )
+        mensal_por_sub = (
+            pld_filtrado_periodo.groupby(["mes", "sub_code"])
+            .agg(mean_pld=("pld", "mean"),
+                  sum_pld=("pld", "sum"),
+                  n_horas=("pld", "count"))
+            .reset_index()
+        )
+        print(f"  PLD mensal por submercado: "
+              f"{mensal_por_sub['sub_code'].nunique()} submercados, "
+              f"{mensal_por_sub['mes'].nunique()} meses")
+    else:
+        mensal_por_sub = pd.DataFrame(columns=["mes", "sub_code", "mean_pld",
+                                                "sum_pld", "n_horas"])
+
     pld = pld[pld["sub"].astype(str).str.upper().str.contains(submercado.upper())]
     pld = pld[(pld["hora"] >= pd.Timestamp(dt_ini)) &
               (pld["hora"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1))]
     pld = pld[["hora", "pld"]].drop_duplicates("hora").sort_values("hora")
     pld.attrs["fallback"] = False
+    pld.attrs["mensal_por_sub"] = mensal_por_sub  # pra simulador PPA
     print(f"  -> {len(pld):,} horas em {submercado}, "
           f"PLD min={pld['pld'].min():.0f} max={pld['pld'].max():.0f} "
           f"R$/MWh")
@@ -1174,16 +1216,40 @@ def cruzar_irradiancia(df_mauriti: pd.DataFrame,
         return pd.DataFrame()
     df = df_mauriti.copy()
     df["hora"] = df["din_instante"].dt.floor("h")
-    # Curtailment "classificado" = so o que tem razao ONS oficial
+    # Curtailment "classificado" = so o que tem razao ONS oficial.
+    # IMPLEMENTACAO ROBUSTA (pandas 3.0+ / CoW friendly): usa mascara
+    # multiplicativa em vez de .where(), garantindo que o resultado seja
+    # sempre uma Series de float64 sem ambiguidade de tipos.
     razoes_oficiais = ["REL", "CNF", "ENE", "PAR"]
-    df["curt_classificado_mwh"] = df["curtailment_mwh"].where(
-        df["cod_razaorestricao"].isin(razoes_oficiais), 0.0)
-    agg = df.groupby("hora").agg(
+    mask = df["cod_razaorestricao"].isin(razoes_oficiais).astype(float)
+    df["curt_classificado_mwh"] = (df["curtailment_mwh"].astype(float)
+                                     * mask).fillna(0.0)
+    agg = df.groupby("hora", as_index=False).agg(
         mwh_gen=("geracao_mwh", "sum"),
         mwh_curt=("curt_classificado_mwh", "sum"),
         mwh_estim=("estimada_mwh", "sum"),
-    ).reset_index()
-    out = agg.merge(irradiancia[["hora", "ghi", "temp"]], on="hora", how="inner")
+    )
+
+    # ===== DIAGNOSTICO GRANULAR =====
+    # Mostra o cruz_irr resumido por hora_dia (mean) ANTES de retornar.
+    # Compare com o [DEBUG] anterior pra identificar onde o dado some.
+    print("\n  [DEBUG cruzar_irradiancia] resumo POR HORA DO DIA:")
+    print("       hora_dia | n_buckets | sum_curt(MWh) | mean_curt(MWh/h) | "
+          "max_curt(MWh)")
+    diag = agg.copy()
+    diag["hora_dia"] = pd.to_datetime(diag["hora"]).dt.hour
+    for h, sub in diag.groupby("hora_dia"):
+        if h in (0, 1, 2, 3, 22, 23):
+            continue
+        print(f"         {h:>2}h    | {len(sub):>9,} | "
+              f"{sub['mwh_curt'].sum():>13,.0f} | "
+              f"{sub['mwh_curt'].mean():>16,.2f} | "
+              f"{sub['mwh_curt'].max():>13,.1f}")
+
+    out = agg.merge(irradiancia[["hora", "ghi", "temp"]],
+                     on="hora", how="inner")
+    print(f"  [DEBUG] cruz_irr final: {len(out):,} linhas "
+          f"(de {len(agg):,} agg + {len(irradiancia):,} NASA, inner join)")
     return out
 
 
@@ -1843,6 +1909,16 @@ def g_irrad_perfil(cruz: pd.DataFrame):
         gen=("mwh_gen", "mean"),
         curt=("mwh_curt", "mean"),
     ).reset_index()
+
+    # ===== DIAGNOSTICO: perfil que vai pro grafico =====
+    print("\n  [DEBUG g_irrad_perfil] perfil que vai pro grafico:")
+    print("       hora_dia | mean_ghi | mean_gen | mean_curt")
+    for _, r in perfil.iterrows():
+        h = int(r["hora_dia"])
+        if h < 4 or h > 19:
+            continue
+        print(f"         {h:>2}h    | {r['ghi']:>8.0f} | "
+              f"{r['gen']:>8.2f} | {r['curt']:>9.2f}")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=perfil["hora_dia"], y=perfil["ghi"],
@@ -2198,6 +2274,73 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .mod-table tr.row-bad td.delta{color:var(--accent-today);font-weight:600}
 .mod-table tr.row-mid td.delta{color:var(--accent-2);font-weight:600}
 .mod-table td.delta{font-variant-numeric:tabular-nums}
+
+/* ============================== */
+/* PPA What-If Simulator (v5.4)   */
+/* ============================== */
+.ppa-simulator{margin:24px 0 16px;padding:28px 32px;
+  background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
+.ppa-type-toggle{display:inline-flex;margin-bottom:24px;
+  border:1px solid var(--rule);border-radius:2px;overflow:hidden}
+.ppa-type-btn{background:var(--panel);border:none;
+  border-right:1px solid var(--rule);cursor:pointer;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  letter-spacing:0.1em;text-transform:uppercase;font-weight:500;
+  padding:10px 18px;color:var(--muted);transition:all 0.15s}
+.ppa-type-btn:last-child{border-right:none}
+.ppa-type-btn:hover{color:var(--ink-2)}
+.ppa-type-btn.active{background:var(--ink);color:var(--bg);font-weight:600}
+.ppa-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;
+  margin-bottom:24px;align-items:start}
+@media(max-width:780px){.ppa-inputs{grid-template-columns:1fr}}
+.ppa-input-group label{display:block;font-family:'IBM Plex Mono',monospace;
+  font-size:10px;color:var(--muted);text-transform:uppercase;
+  letter-spacing:0.15em;margin-bottom:8px;font-weight:500}
+.ppa-input-row{display:flex;gap:12px;align-items:center}
+.ppa-input-row input[type="range"]{flex:1;-webkit-appearance:none;height:4px;
+  background:var(--rule);border-radius:2px;outline:none;cursor:pointer}
+.ppa-input-row input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:18px;height:18px;background:var(--accent);
+  border-radius:50%;cursor:pointer;border:2px solid var(--panel);
+  box-shadow:0 1px 3px rgba(0,0,0,0.15)}
+.ppa-input-row input[type="range"]::-moz-range-thumb{
+  width:18px;height:18px;background:var(--accent);border-radius:50%;
+  cursor:pointer;border:2px solid var(--panel)}
+.ppa-input-row input[type="number"]{width:90px;padding:8px 10px;
+  border:1px solid var(--rule);border-radius:2px;
+  font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
+  text-align:right;background:var(--panel);color:var(--ink)}
+.ppa-select{width:100%;padding:9px 12px;border:1px solid var(--rule);
+  border-radius:2px;font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+  background:var(--panel);color:var(--ink);cursor:pointer}
+.ppa-hint{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);margin-top:6px;letter-spacing:0.05em}
+.ppa-results{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;
+  margin:24px 0;padding:24px 0;
+  border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+@media(max-width:780px){.ppa-results{grid-template-columns:1fr}}
+.ppa-kpi .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);text-transform:uppercase;letter-spacing:0.15em;
+  margin-bottom:8px;font-weight:500}
+.ppa-kpi .val{font-family:'Fraunces',Georgia,serif;font-weight:400;
+  font-size:28px;line-height:1;letter-spacing:-0.02em;color:var(--ink)}
+.ppa-kpi.alt .val{color:var(--accent)}
+.ppa-kpi .delta{font-family:'IBM Plex Mono',monospace;font-size:12px;
+  margin-top:8px;font-weight:600;letter-spacing:0.04em}
+.ppa-kpi .delta.good{color:#2d5a3d}
+.ppa-kpi .delta.bad{color:var(--accent-today)}
+.ppa-kpi .hint{font-family:'IBM Plex Sans',sans-serif;font-size:11px;
+  color:var(--muted);margin-top:6px;font-style:italic}
+.ppa-monthly-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:17px;margin:0 0 14px;color:var(--ink)}
+.ppa-table tr.win td{background:rgba(45,90,61,0.07)}
+.ppa-table tr.win td.delta{color:#2d5a3d;font-weight:600}
+.ppa-table tr.lose td{background:rgba(217,46,15,0.06)}
+.ppa-table tr.lose td.delta{color:var(--accent-today);font-weight:600}
+.ppa-disclaimer{margin:24px 0 0;padding:14px 18px;background:transparent;
+  border:1px dashed var(--rule);font-family:'IBM Plex Sans',sans-serif;
+  font-size:11px;line-height:1.55;color:var(--muted);font-style:italic}
+#ppa-volume-group.hidden{opacity:0.4;pointer-events:none}
 
 footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
   font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
@@ -2639,6 +2782,111 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       {% endif %}
     </div>
 
+    <!-- ========================================================= -->
+    <!-- PPA What-If Simulator (interactive client-side simulation) -->
+    <!-- ========================================================= -->
+    <div class="section-head">
+      <span class="num">IV.</span>
+      <h3 data-i18n="ppa_title">PPA what-if simulator</h3>
+      <span class="tag" data-i18n="ppa_tag">INTERACTIVE</span>
+    </div>
+    <p class="section-desc" data-i18n="ppa_desc">
+      Simulates what Mauriti's revenue would have been under different PPA
+      structures: a fixed monthly volume delivered flat hour-by-hour at a
+      fixed price, optionally in a different submarket. Compares against
+      the real MCP modulated revenue across the period.
+    </p>
+
+    <div class="ppa-simulator">
+      <!-- Toggle PPA type -->
+      <div class="ppa-type-toggle">
+        <button class="ppa-type-btn active" data-type="A"
+                data-i18n="ppa_type_a">Volume limited (A)</button>
+        <button class="ppa-type-btn" data-type="B"
+                data-i18n="ppa_type_b">All-take (B)</button>
+      </div>
+
+      <!-- Inputs -->
+      <div class="ppa-inputs">
+        <!-- PPA Price -->
+        <div class="ppa-input-group">
+          <label data-i18n="ppa_price_label">PPA price (R$/MWh)</label>
+          <div class="ppa-input-row">
+            <input type="range" min="100" max="350" step="5" value="200" id="ppa-price">
+            <input type="number" min="50" max="500" step="1" value="200" id="ppa-price-num">
+          </div>
+        </div>
+
+        <!-- Volume -->
+        <div class="ppa-input-group" id="ppa-volume-group">
+          <label data-i18n="ppa_volume_label">Contracted volume (MWh/month, flat)</label>
+          <div class="ppa-input-row">
+            <input type="range" min="5000" max="50000" step="500" value="20000" id="ppa-volume">
+            <input type="number" min="0" max="200000" step="100" value="20000" id="ppa-volume-num">
+          </div>
+          <div class="ppa-hint" id="ppa-volume-hint"></div>
+        </div>
+
+        <!-- Submercado -->
+        <div class="ppa-input-group">
+          <label data-i18n="ppa_sub_label">Delivery submarket</label>
+          <select id="ppa-submercado" class="ppa-select">
+            <option value="NE" data-i18n="ppa_sub_ne">NE — Nordeste (same as plant)</option>
+            <option value="SECO" selected data-i18n="ppa_sub_seco">SE/CO — Sudeste/Centro-Oeste</option>
+            <option value="S" data-i18n="ppa_sub_s">S — Sul</option>
+            <option value="N" data-i18n="ppa_sub_n">N — Norte</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="ppa-results">
+        <div class="ppa-kpi">
+          <div class="lbl" data-i18n="ppa_kpi_mcp">Real MCP revenue (no PPA)</div>
+          <div class="val" id="ppa-real">—</div>
+          <div class="hint" data-i18n="ppa_kpi_mcp_hint">As observed in the period</div>
+        </div>
+        <div class="ppa-kpi alt">
+          <div class="lbl" data-i18n="ppa_kpi_ppa">Simulated revenue (with PPA)</div>
+          <div class="val" id="ppa-sim">—</div>
+          <div class="delta" id="ppa-delta">—</div>
+        </div>
+        <div class="ppa-kpi">
+          <div class="lbl" data-i18n="ppa_kpi_breakeven">Break-even PPA price</div>
+          <div class="val" id="ppa-breakeven">—</div>
+          <div class="hint" data-i18n="ppa_kpi_breakeven_hint">Above this, PPA beats MCP</div>
+        </div>
+      </div>
+
+      <!-- Monthly table -->
+      <div class="ppa-monthly-wrap">
+        <h4 data-i18n="ppa_monthly_title">Month-by-month comparison</h4>
+        <div class="events-table-wrap">
+          <table class="events-table ppa-table">
+            <thead>
+              <tr>
+                <th data-i18n="ppa_th_month">Month</th>
+                <th class="num" data-i18n="ppa_th_gen">MWh generated</th>
+                <th class="num" data-i18n="ppa_th_pld_sub">PLD sub (R$/MWh)</th>
+                <th class="num" data-i18n="ppa_th_mcp">Real MCP (R$M)</th>
+                <th class="num" data-i18n="ppa_th_ppa">With PPA (R$M)</th>
+                <th class="num" data-i18n="ppa_th_delta">Δ (R$M)</th>
+                <th data-i18n="ppa_th_better">Better</th>
+              </tr>
+            </thead>
+            <tbody id="ppa-monthly-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <p class="ppa-disclaimer" data-i18n="ppa_disclaimer">
+        Simplified model. Real PPAs include curves of seasonal flex,
+        deviation penalties, regulated charges (TUST/TUSD), submarket
+        risk hedging fees, and credit terms not modeled here.
+        Use as directional reference, not for contract pricing.
+      </p>
+    </div>
+
     <div class="bignum">
       <div class="figure">
         {{ "%.1f"|format((met_mod_m.desconto_rs|abs)/1e6) }}<span>R$ M</span>
@@ -3077,6 +3325,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
 <script>
 const FIGS = {{ figs_json|safe }};
+const MOD_MENSAL = {{ mod_mensal_json|safe }};
 
 // I18N dictionary
 const I18N = {
@@ -3181,6 +3430,32 @@ const I18N = {
     mod_th_delta_mwh: "Δ R$/MWh",
     mod_th_delta_pct: "Δ %",
     mod_th_revenue: "Receita real (R$)",
+    ppa_title: "Simulador PPA — análise hipotética",
+    ppa_tag: "INTERATIVO",
+    ppa_desc: "Simula qual seria a receita de Mauriti sob diferentes estruturas de PPA: um volume mensal fixo entregue de forma uniforme (flat) hora a hora a um preço acordado, opcionalmente em outro submercado. Compara com a receita real do MCP modulado no período.",
+    ppa_type_a: "Volume limitado (A)",
+    ppa_type_b: "Toda geração (B)",
+    ppa_price_label: "Preço PPA (R$/MWh)",
+    ppa_volume_label: "Volume contratado (MWh/mês, flat)",
+    ppa_sub_label: "Submercado de entrega",
+    ppa_sub_ne: "NE — Nordeste (mesmo da usina)",
+    ppa_sub_seco: "SE/CO — Sudeste/Centro-Oeste",
+    ppa_sub_s: "S — Sul",
+    ppa_sub_n: "N — Norte",
+    ppa_kpi_mcp: "Receita real MCP (sem PPA)",
+    ppa_kpi_mcp_hint: "Conforme observado no período",
+    ppa_kpi_ppa: "Receita simulada (com PPA)",
+    ppa_kpi_breakeven: "Preço PPA break-even",
+    ppa_kpi_breakeven_hint: "Acima disso, PPA vence o MCP",
+    ppa_monthly_title: "Comparação mês a mês",
+    ppa_th_month: "Mês",
+    ppa_th_gen: "MWh gerados",
+    ppa_th_pld_sub: "PLD sub (R$/MWh)",
+    ppa_th_mcp: "MCP real (R$M)",
+    ppa_th_ppa: "Com PPA (R$M)",
+    ppa_th_delta: "Δ (R$M)",
+    ppa_th_better: "Melhor",
+    ppa_disclaimer: "Modelo simplificado. PPAs reais incluem flexibilidade sazonal, multas por desvio, encargos regulatórios (TUST/TUSD), prêmio de risco de submercado e termos de crédito não modelados aqui. Use como referência direcional, não para precificação contratual.",
     mod_kicker: "PowerChina · Mauriti · Valor de perfil",
     mod_h1_a: "Quanto custou",
     mod_h1_b: "quando",
@@ -3388,6 +3663,194 @@ try {
     applyLangFull(stored);
   }
 } catch(e) {}
+
+// ============================================================
+// PPA What-If Simulator (v5.4)
+// ============================================================
+const ppaState = {
+  type: 'A',        // A = volume limited, B = all-take
+  price: 200,        // R$/MWh
+  volume: 20000,    // MWh/month (flat)
+  submercado: 'SECO' // submarket of delivery
+};
+
+function ppaPldSub(monthEntry, sub) {
+  // Returns mean PLD for given submarket in given month
+  // Fallback: NE PLD (always available)
+  const data = monthEntry.pld_por_sub || {};
+  if (data[sub] && typeof data[sub].mean === 'number') return data[sub].mean;
+  if (data.NE && typeof data.NE.mean === 'number') return data.NE.mean;
+  return monthEntry.pld_medio_ne || 0;
+}
+
+function ppaCalc() {
+  const { price, volume, type, submercado } = ppaState;
+  let total_ppa = 0, total_mcp = 0, total_gen = 0;
+  const rows = (MOD_MENSAL || []).map(m => {
+    const pld_sub = ppaPldSub(m, submercado);
+    let ppa_rev;
+    if (type === 'B') {
+      // All-take: cliente leva toda a geracao ao preco fixo P
+      // (geracao real Mauriti × preco PPA)
+      ppa_rev = m.mwh_total * price;
+    } else {
+      // Volume limited flat horario:
+      // Receita total = receita_real_NE + volume × (P - PLD_medio_sub_entrega)
+      // O termo (P - PLD_sub) eh o spread financeiro do contrato flat.
+      // A geracao continua sendo vendida no spot NE (receita_real).
+      const extra = volume * (price - pld_sub);
+      ppa_rev = m.receita_real + extra;
+    }
+    total_ppa += ppa_rev;
+    total_mcp += m.receita_real;
+    total_gen += m.mwh_total;
+    return {
+      month_label: m.month_label,
+      gen: m.mwh_total,
+      pld_sub: pld_sub,
+      mcp: m.receita_real,
+      ppa: ppa_rev,
+      delta: ppa_rev - m.receita_real
+    };
+  });
+
+  // Break-even price calculation
+  // For both types: solve for P where total_ppa(P) == total_mcp
+  let breakeven;
+  if (type === 'B') {
+    // All-take: total_ppa = sum(gen) × P, so P_be = total_mcp / total_gen
+    breakeven = total_gen > 0 ? total_mcp / total_gen : 0;
+  } else {
+    // Volume limited:
+    // total_ppa = sum(receita_real) + volume × (P × n_meses - sum(PLD_sub))
+    // Setting total_ppa = total_mcp:
+    // volume × (P × n_meses - sum_PLD) = 0
+    // P = mean(PLD_sub)
+    const meanPld = MOD_MENSAL.reduce((s, m) => s + ppaPldSub(m, submercado), 0)
+                    / Math.max(1, MOD_MENSAL.length);
+    breakeven = meanPld;
+  }
+
+  return { rows, total_ppa, total_mcp, total_gen, breakeven };
+}
+
+function ppaFmtMoney(n) {
+  const sign = n < 0 ? '-' : '';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${sign}R$ ${(abs/1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}R$ ${(abs/1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}R$ ${(abs/1e3).toFixed(0)}k`;
+  return `${sign}R$ ${abs.toFixed(0)}`;
+}
+
+function ppaRender() {
+  if (!MOD_MENSAL || MOD_MENSAL.length === 0) {
+    document.getElementById('ppa-real').textContent = '—';
+    document.getElementById('ppa-sim').textContent = '—';
+    return;
+  }
+  const r = ppaCalc();
+
+  document.getElementById('ppa-real').textContent = ppaFmtMoney(r.total_mcp);
+  document.getElementById('ppa-sim').textContent = ppaFmtMoney(r.total_ppa);
+
+  const delta = r.total_ppa - r.total_mcp;
+  const deltaPct = r.total_mcp !== 0 ? 100 * delta / r.total_mcp : 0;
+  const deltaEl = document.getElementById('ppa-delta');
+  const sign = delta >= 0 ? '+' : '';
+  deltaEl.textContent = `${sign}${ppaFmtMoney(delta)} (${sign}${deltaPct.toFixed(1)}%)`;
+  deltaEl.className = 'delta ' + (delta >= 0 ? 'good' : 'bad');
+
+  document.getElementById('ppa-breakeven').textContent =
+    'R$ ' + Math.round(r.breakeven) + '/MWh';
+
+  // Volume hint: MWmed equivalent (rough)
+  const avgHoursMonth = MOD_MENSAL.length
+    ? MOD_MENSAL.reduce((s,m) => s + (m.n_horas_mes||720), 0) / MOD_MENSAL.length
+    : 720;
+  const mwmed = ppaState.volume / avgHoursMonth;
+  document.getElementById('ppa-volume-hint').textContent =
+    `≈ ${mwmed.toFixed(1)} MWmed (avg)`;
+
+  // Table
+  const tbody = document.getElementById('ppa-monthly-rows');
+  tbody.innerHTML = r.rows.map(row => {
+    const cls = row.delta >= 0 ? 'win' : 'lose';
+    const s = row.delta >= 0 ? '+' : '';
+    const lang = document.body.dataset.lang || 'en';
+    const better_pt = row.delta >= 0 ? 'PPA ↑' : 'MCP ↑';
+    const better_en = better_pt;
+    return `
+      <tr class="${cls}">
+        <td>${row.month_label}</td>
+        <td class="num">${Math.round(row.gen).toLocaleString('en-US').replace(/,/g,' ')}</td>
+        <td class="num">${Math.round(row.pld_sub)}</td>
+        <td class="num">${(row.mcp/1e6).toFixed(2)}</td>
+        <td class="num">${(row.ppa/1e6).toFixed(2)}</td>
+        <td class="num delta">${s}${(row.delta/1e6).toFixed(2)}</td>
+        <td>${better_pt}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function ppaInit() {
+  if (!MOD_MENSAL || MOD_MENSAL.length === 0) {
+    console.warn('PPA simulator: no monthly data available');
+    return;
+  }
+
+  // Helper to sync slider <-> number input
+  function syncPair(rangeId, numId, key) {
+    const r = document.getElementById(rangeId);
+    const n = document.getElementById(numId);
+    if (!r || !n) return;
+    const onChange = (src) => {
+      const val = parseFloat(src.value);
+      if (isNaN(val)) return;
+      if (src === r) n.value = val;
+      else r.value = val;
+      ppaState[key] = val;
+      ppaRender();
+    };
+    r.addEventListener('input', () => onChange(r));
+    n.addEventListener('input', () => onChange(n));
+  }
+  syncPair('ppa-price', 'ppa-price-num', 'price');
+  syncPair('ppa-volume', 'ppa-volume-num', 'volume');
+
+  // Submercado dropdown
+  const sub = document.getElementById('ppa-submercado');
+  if (sub) {
+    sub.addEventListener('change', () => {
+      ppaState.submercado = sub.value;
+      ppaRender();
+    });
+  }
+
+  // Toggle PPA type
+  document.querySelectorAll('.ppa-type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.ppa-type-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      ppaState.type = btn.dataset.type;
+      // Disable volume input on type B (all-take = volume is not used)
+      const volGroup = document.getElementById('ppa-volume-group');
+      if (volGroup) {
+        if (ppaState.type === 'B') volGroup.classList.add('hidden');
+        else volGroup.classList.remove('hidden');
+      }
+      ppaRender();
+    });
+  });
+
+  ppaRender();
+}
+
+ppaInit();
+
+// Re-render PPA table when language toggle is fired
+window.addEventListener('mauriti-lang-changed', ppaRender);
 </script>
 
 </body>
@@ -3484,6 +3947,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
     # Resumo macro: 1 linha de prosa acima do grafico mostrando totais
     mod_summary = {"vazio": True}
     mod_tabela_dias: list[dict] = []
+    mod_mensal_data: list[dict] = []  # pro simulador PPA (preenchido abaixo)
     if not cur_m.empty:
         mwh_total = float(cur_m["mwh_dia"].sum())
         receita_real_total = float(cur_m["receita_real"].sum())
@@ -3526,6 +3990,54 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
               f"PLD med {pld_medio_mes:.0f} vs efetivo {pld_efetivo_mes:.0f} "
               f"R$/MWh, desconto {cur_pct:.2f}%, "
               f"pior dia {pior['dia'].strftime('%d')} ({pior['desconto_pct']:.1f}%)")
+
+    # ========== AGREGADO MENSAL PARA O SIMULADOR PPA ==========
+    # Para cada mes, agrega geração+receita de Mauriti + PLD de todos os
+    # submercados. JS no client-side usa pra simular cenarios de PPA.
+    if not diario_m.empty:
+        d_m = diario_m.copy()
+        d_m["mes"] = pd.to_datetime(d_m["dia"]).dt.to_period("M").dt.to_timestamp()
+        # PLD por submercado mensal (vindo do attrs do PLD)
+        pld_mensal_sub = pld.attrs.get("mensal_por_sub", pd.DataFrame())
+        # Pra cada mes
+        for mes, grp in d_m.groupby("mes"):
+            mwh_total_mes = float(grp["mwh_dia"].sum())
+            rev_real = float(grp["receita_real"].sum())
+            rev_flat = float(grp["receita_flat"].sum())
+            pld_avg = float(grp["pld_avg"].mean())  # NE medio
+            pld_efetivo = (rev_real / mwh_total_mes
+                            if mwh_total_mes > 0 else 0.0)
+            n_dias_mes = int(len(grp))
+            # PLD por submercado naquele mes
+            pld_por_sub = {}
+            if not pld_mensal_sub.empty:
+                sub_mes = pld_mensal_sub[pld_mensal_sub["mes"] == mes]
+                for _, r in sub_mes.iterrows():
+                    pld_por_sub[r["sub_code"]] = {
+                        "mean": round(float(r["mean_pld"]), 2),
+                        "sum": round(float(r["sum_pld"]), 0),
+                        "n_horas": int(r["n_horas"]),
+                    }
+            # n_horas do mes (pra calculos de PPA flat)
+            n_horas_mes = (pld_por_sub.get("NE", {}).get("n_horas")
+                            or pld_por_sub.get("SECO", {}).get("n_horas")
+                            or (n_dias_mes * 24))
+            mod_mensal_data.append(dict(
+                month=mes.strftime("%Y-%m"),
+                month_label=mes.strftime("%b/%y"),
+                mwh_total=round(mwh_total_mes, 1),
+                receita_real=round(rev_real, 0),
+                receita_flat=round(rev_flat, 0),
+                pld_medio_ne=round(pld_avg, 2),
+                pld_efetivo=round(pld_efetivo, 2),
+                n_dias=n_dias_mes,
+                n_horas_mes=int(n_horas_mes),
+                pld_por_sub=pld_por_sub,
+            ))
+        if mod_mensal_data:
+            print(f"\n[*] Agregado mensal para simulador PPA: "
+                  f"{len(mod_mensal_data)} meses, submercados disponiveis: "
+                  f"{sorted(set(s for m in mod_mensal_data for s in m['pld_por_sub']))}")
 
     # ========== REN 1.030 ==========
     print("\n[*] Identificando eventos elegiveis REN 1.030/2022...")
@@ -3676,13 +4188,135 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         ),
         mod_summary=mod_summary,
         mod_tabela_dias=mod_tabela_dias,
-        trend=trend,
+        mod_mensal_json=json.dumps(mod_mensal_data, default=str),
         met_ren=met_ren,
         eventos_top=eventos_top,
         met_irr=met_irr,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")
+
+    # ========== EXPORT JSON DE RESUMO DIARIO (pra envio por email) ==========
+    # Este JSON eh consumido pelo enviar_email.py no workflow do GitHub Actions.
+    # Salva em ./public/daily_summary.json (publicado junto com o dashboard).
+    try:
+        df_d = mauriti.df.copy()
+        df_d["dia"] = df_d["din_instante"].dt.date
+        df_d = df_d.dropna(subset=["dia"])
+        most_recent_day = max(df_d["dia"]) if not df_d.empty else None
+        if most_recent_day is not None:
+            sub = df_d[df_d["dia"] == most_recent_day]
+            mwh_curt = float(sub["curtailment_mwh"].sum())
+            mwh_estim = float(sub["estimada_mwh"].sum())
+            mwh_gen = float(sub["geracao_mwh"].sum())
+            cf_pct = (100 * mwh_curt / mwh_estim) if mwh_estim > 0 else 0.0
+            # Modulacao do dia (via diario_m)
+            dia_ts = pd.Timestamp(most_recent_day)
+            row_m = diario_m[diario_m["dia"] == dia_ts] if not diario_m.empty else pd.DataFrame()
+            if not row_m.empty:
+                r = row_m.iloc[0]
+                pld_avg_day = float(r["pld_avg"])
+                pld_eff_day = (float(r["preco_efetivo"])
+                                 if pd.notna(r["preco_efetivo"]) else 0.0)
+                mod_pct_day = (float(r["desconto_pct"])
+                                if pd.notna(r["desconto_pct"]) else 0.0)
+                mod_rs_day = (float(r["receita_real"] - r["receita_flat"])
+                                if pd.notna(r["receita_real"]) else 0.0)
+            else:
+                pld_avg_day = pld_eff_day = mod_pct_day = mod_rs_day = 0.0
+            # Pior hora do dia
+            sub2 = sub.copy()
+            sub2["hora_dia"] = sub2["din_instante"].dt.hour
+            by_hour = (sub2.groupby("hora_dia")
+                         .agg(mwh=("curtailment_mwh", "sum"),
+                               pld=("pld", "mean"))
+                         .reset_index())
+            if not by_hour.empty and by_hour["mwh"].max() > 0.01:
+                w = by_hour.loc[by_hour["mwh"].idxmax()]
+                worst_hour = {"hour": int(w["hora_dia"]),
+                                "mwh": round(float(w["mwh"]), 1),
+                                "pld": round(float(w["pld"]), 2)}
+            else:
+                worst_hour = None
+            # REN events do dia
+            if not eventos.empty:
+                eventos_dia = eventos[
+                    pd.to_datetime(eventos["data_inicio_str"]).dt.date == most_recent_day
+                ]
+                n_ren = int(len(eventos_dia))
+                ren_mwh_day = float(eventos_dia["mwh_cortado"].sum())
+            else:
+                n_ren = 0
+                ren_mwh_day = 0.0
+
+            daily_summary = {
+                "generated_at": today.isoformat(),
+                "period": periodo,
+                "submarket": pld_sub,
+                "dashboard_url": "https://rtbarbosa3.github.io/mauriti-curtailment/",
+                "csv_url": ("https://rtbarbosa3.github.io/"
+                             "mauriti-curtailment/eventos_elegiveis_ren1030.csv"),
+                "most_recent_day": {
+                    "date": most_recent_day.isoformat(),
+                    "date_br": most_recent_day.strftime("%d/%m/%Y"),
+                    "cf_pct": round(cf_pct, 2),
+                    "mwh_curtailed": round(mwh_curt, 1),
+                    "mwh_estimated": round(mwh_estim, 1),
+                    "mwh_generated": round(mwh_gen, 1),
+                    "pld_avg_rs_mwh": round(pld_avg_day, 1),
+                    "pld_effective_rs_mwh": round(pld_eff_day, 1),
+                    "modulation_disc_pct": round(mod_pct_day, 2),
+                    "modulation_disc_rs": round(mod_rs_day, 0),
+                    "ren_events": n_ren,
+                    "ren_mwh_eligible": round(ren_mwh_day, 1),
+                    "worst_hour": worst_hour,
+                },
+                "trend_30_90_365": {
+                    "direction": trend.get("tendencia", "indefinida")
+                        if not trend.get("vazio") else "n/a",
+                    "cf_30d_pct": round(trend.get("cf_d30", 0), 2),
+                    "cf_90d_pct": round(trend.get("cf_d90", 0), 2),
+                    "cf_365d_pct": round(trend.get("cf_d365", 0), 2),
+                    "delta_30_vs_365_pp": round(trend.get("delta_30_vs_365", 0), 2),
+                },
+                "month_to_date": mod_summary if not mod_summary.get("vazio") else None,
+                "vs_peers": {
+                    "n_peer_groups": len(grupos),
+                    "mauriti_cf_pct": round(met_m.get("curtailment_factor", 0), 2),
+                    "peers_cf_pct": round(met_b.get("curtailment_factor", 0), 2)
+                        if not met_b.get("vazio") else None,
+                    "delta_pp": round(
+                        met_m.get("curtailment_factor", 0)
+                        - met_b.get("curtailment_factor", 0), 2)
+                        if not met_b.get("vazio") else None,
+                },
+                "vs_ne_fleet_modulation": {
+                    "mauriti_disc_pct": round(met_mod_m.get("desconto_pct", 0), 2)
+                        if not met_mod_m.get("vazio") else None,
+                    "ne_fleet_disc_pct": round(met_mod_ne.get("desconto_pct", 0), 2)
+                        if not met_mod_ne.get("vazio") else None,
+                },
+                "totals_period": {
+                    "mwh_curtailed": round(met_m.get("total_curt_mwh", 0), 0),
+                    "lost_revenue_rs": round(met_m.get("receita_perdida", 0), 0),
+                    "cf_pct": round(met_m.get("curtailment_factor", 0), 2),
+                    "ren_eligible_events": int(met_ren.get("n_eventos", 0))
+                        if not met_ren.get("vazio") else 0,
+                    "ren_eligible_mwh": round(met_ren.get("mwh_total", 0), 0)
+                        if not met_ren.get("vazio") else 0,
+                },
+            }
+            json_path = output.parent / "daily_summary.json"
+            json_path.write_text(
+                json.dumps(daily_summary, indent=2, ensure_ascii=False,
+                            default=str),
+                encoding="utf-8")
+            print(f"\n[OK] Resumo diario salvo em: {json_path}")
+            print(f"     Ultimo dia com dados: {most_recent_day} "
+                  f"(CF {cf_pct:.2f}%, {mwh_curt:.0f} MWh cortados)")
+    except Exception as e:
+        print(f"\n[!] Erro ao gerar daily_summary.json: "
+              f"{e.__class__.__name__}: {e}")
 
 
 # =============================================================================
