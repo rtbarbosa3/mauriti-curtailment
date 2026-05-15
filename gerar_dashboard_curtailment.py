@@ -450,7 +450,12 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
     cache = _ensure_dir(Path(cfg["cache_dir"]) / "nasa")
     cache_file = cache / f"power_{cfg['mauriti_lat']}_{cfg['mauriti_lon']}.csv"
 
-    # Se cache existe e foi atualizado hoje, le dele
+    # Estima cobertura esperada para validar cache (24h * dias do periodo)
+    n_dias_periodo = max(1, (dt_fim - dt_ini).days + 1)
+    horas_esperadas = n_dias_periodo * 24
+    cobertura_min = 0.70  # exigir ao menos 70% de cobertura
+
+    # Se cache existe e foi atualizado hoje E tem cobertura suficiente, le dele
     if cache_file.exists():
         try:
             mtime = datetime.fromtimestamp(cache_file.stat().st_mtime).date()
@@ -459,10 +464,18 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
                 df["hora"] = pd.to_datetime(df["hora"])
                 df = df[(df["hora"] >= pd.Timestamp(dt_ini)) &
                         (df["hora"] <= pd.Timestamp(dt_fim) + pd.Timedelta(days=1))]
-                print(f"  [cache hoje] {len(df):,} horas")
-                return df
-        except Exception:
-            pass
+                cobertura = len(df) / horas_esperadas
+                if cobertura >= cobertura_min:
+                    print(f"  [cache hoje] {len(df):,} horas "
+                          f"({100*cobertura:.0f}% do periodo)")
+                    return df
+                else:
+                    print(f"  [!] Cache hoje tem cobertura BAIXA "
+                          f"({len(df):,}h / {horas_esperadas:,}h = "
+                          f"{100*cobertura:.0f}%) — re-baixando do zero")
+                    cache_file.unlink()  # remove cache ruim
+        except Exception as e:
+            print(f"  [!] Erro lendo cache ({e}) — re-baixando")
 
     # NASA POWER API: max 366 dias por chamada -> dividir em pedacos anuais
     today = date.today()
@@ -507,7 +520,14 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
                     continue
                 # Converte de UTC para BRT (UTC-3)
                 ts_brt = ts - timedelta(hours=3)
-                ghi_v = float(ghi_val) if ghi_val not in (None, -999, "-999") else None
+                # NASA usa -999 para "sem medida" — tratar como 0 (ao inves
+                # de descartar) preserva a linha temporal e o merge inner.
+                # Para horas noturnas isso eh correto (GHI=0). Para horas
+                # diurnas com nuvem espessa, GHI=0 eh uma aproximacao OK.
+                if ghi_val in (None, -999, "-999"):
+                    ghi_v = 0.0
+                else:
+                    ghi_v = float(ghi_val)
                 temp_v = t2m.get(ts_str)
                 temp_v = (float(temp_v) if temp_v not in (None, -999, "-999")
                           else None)
@@ -521,7 +541,7 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
         return pd.DataFrame(columns=["hora", "ghi", "temp"])
 
     df = pd.DataFrame(all_rows)
-    df = df.dropna(subset=["ghi"])
+    # Note: nao usa dropna(subset=['ghi']) — agora -999 vira 0 acima.
     df = df.drop_duplicates("hora").sort_values("hora")
     # Salva cache
     try:
