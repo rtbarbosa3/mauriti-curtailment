@@ -1250,6 +1250,23 @@ def cruzar_irradiancia(df_mauriti: pd.DataFrame,
                      on="hora", how="inner")
     print(f"  [DEBUG] cruz_irr final: {len(out):,} linhas "
           f"(de {len(agg):,} agg + {len(irradiancia):,} NASA, inner join)")
+
+    # ===== DIAGNOSTICO DO out APOS MERGE NASA =====
+    print("\n  [DEBUG cruzar APOS merge NASA] resumo POR HORA DO DIA:")
+    print("       hora_dia | n_apos_merge | sum_curt(MWh) | mean_curt(MWh/h)")
+    out_d = out.copy()
+    out_d["hora_dia"] = pd.to_datetime(out_d["hora"]).dt.hour
+    for h, sub in out_d.groupby("hora_dia"):
+        if h < 4 or h > 19:
+            continue
+        n_buckets = len(sub)
+        sum_c = sub["mwh_curt"].sum()
+        mean_c = sub["mwh_curt"].mean() if n_buckets > 0 else 0
+        # Quantos buckets têm curt > 0?
+        n_com_curt = int((sub["mwh_curt"] > 0.01).sum())
+        print(f"         {h:>2}h    | {n_buckets:>12,} | "
+              f"{sum_c:>13,.0f} | {mean_c:>16,.2f} "
+              f"(n com curt>0: {n_com_curt})")
     return out
 
 
@@ -4189,6 +4206,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         mod_summary=mod_summary,
         mod_tabela_dias=mod_tabela_dias,
         mod_mensal_json=json.dumps(mod_mensal_data, default=str),
+        trend=trend,
         met_ren=met_ren,
         eventos_top=eventos_top,
         met_irr=met_irr,
