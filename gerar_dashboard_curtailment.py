@@ -1638,9 +1638,6 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
     else:
         next_first = date(cur_first.year, cur_first.month + 1, 1)
     days_in_month = (next_first - cur_first).days
-    # MUDANCA (v5.3): cortar eixo X ate o dia atual + 1 buffer
-    # Antes: mostrava todos os 31 dias do mes (com 20+ vazios no comeco do mes)
-    # Agora: mostra apenas dia 1 ate today + 1 dia de margem
     days_to_show = min(today.day + 1, days_in_month)
     all_days = [cur_first + timedelta(days=i) for i in range(days_to_show)]
 
@@ -1652,18 +1649,94 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
 
     x = [d.strftime("%d") for d in cur["dia"]]
     fig = go.Figure()
+
+    # ---------- ZONAS DE SEVERIDADE (background colorido em y2) ----------
+    # Faixas horizontais indicam zona de risco do modulation discount.
+    # NOTA: usamos shapes em yref='y2' com layer='below' pra ficar atras
+    # das barras e da linha.
+    if len(x) > 0:
+        x_left, x_right = -0.5, len(x) - 0.5
+        # Zona OK: 0% a -25% (verde claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=-25, y1=5,
+                       fillcolor="rgba(45,90,61,0.04)",
+                       line=dict(width=0), layer="below")
+        # Zona ATENCAO: -25% a -40% (amarelo claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=-40, y1=-25,
+                       fillcolor="rgba(217,140,30,0.05)",
+                       line=dict(width=0), layer="below")
+        # Zona CRITICA: -40% pra baixo (vermelho claro)
+        fig.add_shape(type="rect", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=-100, y1=-40,
+                       fillcolor="rgba(217,46,15,0.05)",
+                       line=dict(width=0), layer="below")
+        # Linha zero (referencia "sem desconto") sutil
+        fig.add_shape(type="line", xref="x", yref="y2",
+                       x0=x_left, x1=x_right, y0=0, y1=0,
+                       line=dict(color=EL["neutral"], width=0.8, dash="dash"),
+                       layer="below")
+
+    # ---------- BARRAS (receita flat / real) ----------
     fig.add_trace(go.Bar(x=x, y=cur["receita_flat"], name="Receita flat (R$)",
         marker=dict(color=EL["muted"], opacity=0.65, line=dict(width=0)),
         hovertemplate="<b>Dia %{x}</b><br>Flat: R$ %{y:,.0f}<extra></extra>"))
     fig.add_trace(go.Bar(x=x, y=cur["receita_real"], name="Receita real (R$)",
         marker=dict(color=EL["ink_2"], line=dict(width=0)),
         hovertemplate="<b>Dia %{x}</b><br>Real: R$ %{y:,.0f}<extra></extra>"))
+
+    # ---------- LINHA % desconto ----------
     fig.add_trace(go.Scatter(x=x, y=cur["desconto_pct"], name="% desconto",
         mode="lines+markers", yaxis="y2",
         line=dict(color=EL["accent_today"], width=2.5),
         marker=dict(size=8, color=EL["accent_today"],
                      line=dict(color=EL["panel"], width=1.5)),
         hovertemplate="<b>Dia %{x}</b><br>Desc.: %{y:.2f}%<extra></extra>"))
+
+    # ---------- MARKER DIA ATUAL ----------
+    # Destaca o dia corrente com um circulo maior, borda preta, label "today"
+    today_str = today.strftime("%d")
+    if today_str in x:
+        idx_today = x.index(today_str)
+        val_today = cur["desconto_pct"].iloc[idx_today]
+        if pd.notna(val_today):
+            fig.add_trace(go.Scatter(
+                x=[today_str], y=[val_today],
+                mode="markers+text", yaxis="y2",
+                marker=dict(size=16, color=EL["accent_today"],
+                             line=dict(color="#1a1a1a", width=2),
+                             symbol="circle"),
+                text=["today"],
+                textposition="top center",
+                textfont=dict(family="'IBM Plex Mono'", size=10,
+                              color="#1a1a1a", weight="bold"),
+                name="today",
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+    # ---------- ANNOTATION PIOR DIA ----------
+    # So adiciona se tem pelo menos um dia critico (desconto < -40%)
+    desconto_validos = cur["desconto_pct"].dropna()
+    if len(desconto_validos) > 0:
+        idx_pior = desconto_validos.idxmin()
+        pior_val = cur.loc[idx_pior, "desconto_pct"]
+        pior_dia = cur.loc[idx_pior, "dia"]
+        if pior_val < -25:  # so destaca se realmente foi ruim
+            fig.add_annotation(
+                x=pior_dia.strftime("%d"), y=pior_val,
+                yref="y2",
+                text=f"<b>worst: day {pior_dia.day} · {pior_val:.1f}%</b>",
+                showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=1.5,
+                arrowcolor=EL["accent_today"],
+                ax=40, ay=30,
+                bgcolor="#fafaf6", borderpad=6, borderwidth=1,
+                bordercolor=EL["accent_today"],
+                font=dict(family="'IBM Plex Mono'", size=10,
+                          color=EL["accent_today"]),
+            )
+
+    # ---------- BENCHMARK NE ----------
     if ref_pct_ne is not None:
         fig.add_hline(y=ref_pct_ne, yref="y2",
             line=dict(color=EL["neutral"], width=1.2, dash="dot"),
@@ -1671,6 +1744,7 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
             annotation_position="top right",
             annotation=dict(font=dict(family="'IBM Plex Mono',monospace",
                                        size=10, color=EL["neutral"])))
+
     lay = dict(LAY); lay.update(
         title=ed_title(f"Mauriti — {cur_first.strftime('%B/%Y').lower()}  ·  "
                         "receita real vs receita flat", 20),
@@ -1679,8 +1753,9 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
                     gridcolor=EL["border"]),
         yaxis=dict(title="R$ / dia", gridcolor=EL["border"]),
         yaxis2=dict(title="% desconto modulacao", overlaying="y", side="right",
-                     showgrid=False, color=EL["accent_today"], ticksuffix="%"),
-        hovermode="x unified", height=460, bargap=0.25, bargroupgap=0.05,
+                     showgrid=False, color=EL["accent_today"], ticksuffix="%",
+                     range=[-80, 10]),  # range fixo pras zonas ficarem visiveis
+        hovermode="x unified", height=480, bargap=0.25, bargroupgap=0.05,
     )
     fig.update_layout(**lay); return fig
 
@@ -1871,24 +1946,58 @@ def g_ren_origem(eventos: pd.DataFrame):
                   .agg(mwh=("mwh_cortado", "sum"),
                         n=("usina", "count"))
                   .sort_values("mwh", ascending=True).tail(10))
+    total_mwh = float(by_origem["mwh"].sum())
+    total_evt = int(by_origem["n"].sum())
+
+    # Cores semanticas por ORIGEM: LOC (local, controlavel) cinza-azulado,
+    # SIS (sistemico, sem controle) vermelho. Detecta pelo prefixo do label.
+    def _cor_origem(label: str) -> str:
+        s = str(label).upper()
+        if s.startswith("LOC"):
+            return "#5b6b7d"  # cinza-azulado (causa local)
+        if s.startswith("SIS"):
+            return EL["accent_today"]  # vermelho (causa sistemica)
+        return EL["accent_2"]  # fallback
+
+    cores_bar = [_cor_origem(lab) for lab in by_origem.index]
+
+    # Texto na ponta: percentual + MWh + events
+    texto = []
+    for lab, v, n in zip(by_origem.index, by_origem["mwh"], by_origem["n"]):
+        pct = (100.0 * v / total_mwh) if total_mwh > 0 else 0.0
+        texto.append(f"  {pct:.0f}% · {v:,.0f} MWh · {n} ev.")
+
     fig = go.Figure(go.Bar(
         y=by_origem.index, x=by_origem["mwh"], orientation="h",
-        marker=dict(color=EL["accent_2"]),
-        text=[f"{v:,.0f} MWh · {n} events" for v, n in
-              zip(by_origem["mwh"], by_origem["n"])],
-        textposition="outside",
+        marker=dict(color=cores_bar, line=dict(width=0)),
+        text=texto, textposition="outside",
         textfont=dict(color=EL["ink_2"], size=10,
                        family="'IBM Plex Mono',monospace"),
         hovertemplate="<b>%{y}</b><br>%{x:,.1f} MWh<extra></extra>",
+        cliponaxis=False,
     ))
+
+    # Total annotation no canto superior direito
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.99, y=1.10,
+        xanchor="right", yanchor="top", showarrow=False,
+        text=(f"<b>Total: {total_mwh:,.0f} MWh</b> &middot; "
+              f"{total_evt} events"),
+        bgcolor=EL["bg_alt"], bordercolor=EL["border"], borderwidth=1,
+        borderpad=6,
+        font=dict(family="'IBM Plex Mono',monospace", size=11,
+                   color=EL["ink"]),
+    )
+
     lay = dict(LAY); lay.update(
         title=ed_title("Top sources of eligible curtailment", 20),
-        xaxis=dict(title="MWh", gridcolor=EL["border"]),
+        xaxis=dict(title="MWh", gridcolor=EL["border"],
+                    range=[0, total_mwh * 0.85]),  # espaco pro texto
         yaxis=dict(gridcolor=EL["border"],
                     tickfont=dict(family="'IBM Plex Mono',monospace",
                                    size=11, color=EL["ink"])),
-        height=max(300, 38 * len(by_origem) + 80),
-        margin=dict(l=260, r=180, t=60, b=50),  # label mais larga
+        height=max(300, 42 * len(by_origem) + 100),
+        margin=dict(l=260, r=200, t=90, b=50),  # mais top space pro total
         showlegend=False,
     )
     fig.update_layout(**lay); return fig
@@ -1992,25 +2101,145 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
         return go.Figure(layout=dict(LAY,
                                        title=ed_title("Weekday × hour", 20)))
     dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    x_lab = [dow_labels[i] for i in cf_pivot.columns]
+    today_dow = datetime.now().weekday()  # 0=Mon ... 6=Sun
+    # Weekend em bold via HTML inline (Plotly suporta em tick labels)
+    # Tambem marca dia atual com triangulo discreto.
+    x_lab = []
+    for d in cf_pivot.columns:
+        label = dow_labels[d]
+        # Bold em weekend
+        if d >= 5:  # Sat (5) or Sun (6)
+            label = f"<b>{label}</b>"
+        # Marca dia atual
+        if d == today_dow:
+            label = f"{label}<br><span style='color:#d92e0f;font-size:14px'>▼</span>"
+        x_lab.append(label)
+
+    # Valores dentro das celulas — suprime <2% pra reduzir poluicao visual.
+    # Tambem decide cor do texto: branco em celulas escuras (z>=30), preto
+    # nas claras. Sem isso fica ilegivel em CF alto.
+    z_arr = cf_pivot.values
+    text_matrix = []
+    textcolor_matrix = []  # nao usado direto, mas inspirou a logica abaixo
+    for row in z_arr:
+        text_row = []
+        for v in row:
+            if v >= 2.0:
+                text_row.append(f"{v:.0f}")
+            else:
+                text_row.append("")
+        text_matrix.append(text_row)
+
+    # Escala de cor mais agressiva nos valores baixos — Mauriti tem CF
+    # mediana ~10-25%, entao breakpoints baixos sao onde queremos ver
+    # diferenca. Comprime os 60-100% que sao raros.
+    colorscale = [
+        [0.00, EL["bg"]],
+        [0.03, "#fbf3e3"],
+        [0.10, "#f1d8b0"],
+        [0.25, "#e8b485"],
+        [0.45, EL["accent_light"]],
+        [0.70, EL["accent"]],
+        [1.00, "#5e1d10"],
+    ]
+
+    zmax_val = min(80, float(z_arr.max()) if z_arr.size > 0 else 80)
     fig = go.Figure(go.Heatmap(
-        z=cf_pivot.values, x=x_lab, y=cf_pivot.index,
-        colorscale=[[0.0, EL["bg"]], [0.05, "#f1e8d8"], [0.20, "#e6c7a8"],
-                     [0.45, EL["accent_light"]], [0.75, EL["accent"]],
-                     [1.0, "#5e1d10"]],
+        z=z_arr, x=x_lab, y=cf_pivot.index,
+        text=text_matrix,
+        texttemplate="%{text}",
+        textfont=dict(family="'IBM Plex Mono', monospace",
+                       size=10, color="#1a1a1a"),
+        colorscale=colorscale,
         colorbar=dict(title=dict(text="CF%", font=dict(size=11)),
                        outlinewidth=0, ticksuffix="%",
                        tickfont=dict(family="'IBM Plex Mono'", size=10)),
-        zmax=min(80, float(cf_pivot.values.max()) if cf_pivot.size > 0 else 80),
-        zmin=0,
+        zmax=zmax_val, zmin=0,
+        xgap=1, ygap=1,  # linhas finas entre celulas, ajuda leitura
         hovertemplate="<b>%{x} %{y}h</b><br>CF: %{z:.1f}%<extra></extra>",
     ))
+
+    # Texto BRANCO em celulas com z >= 30% (escuras), via annotations extras
+    # sobre as celulas com valor alto — Plotly nao suporta cor de texto por
+    # celula nativamente em heatmap, entao usamos add_annotation.
+    n_hours, n_cols = z_arr.shape
+    threshold_white_text = zmax_val * 0.55  # ~ 55% do zmax = celula escura
+    for iy in range(n_hours):
+        hora = cf_pivot.index[iy]
+        for ix in range(n_cols):
+            v = z_arr[iy, ix]
+            if v >= threshold_white_text:
+                fig.add_annotation(
+                    x=x_lab[ix], y=hora,
+                    text=f"<b>{v:.0f}</b>",
+                    showarrow=False,
+                    font=dict(family="'IBM Plex Mono', monospace",
+                              size=10, color="#fafaf6"),
+                )
+
+    # Linhas pontilhadas delineando a "janela solar" (6h-18h)
+    fig.add_shape(
+        type="line",
+        x0=-0.5, x1=n_cols - 0.5,
+        y0=5.5, y1=5.5,
+        line=dict(color="#1a1a1a", width=1.2, dash="dot"),
+        layer="above",
+    )
+    fig.add_shape(
+        type="line",
+        x0=-0.5, x1=n_cols - 0.5,
+        y0=18.5, y1=18.5,
+        line=dict(color="#1a1a1a", width=1.2, dash="dot"),
+        layer="above",
+    )
+    # Annotation rotulando a janela solar (lateral direita)
+    fig.add_annotation(
+        x=n_cols - 0.5, y=12,
+        text="solar window  6h–18h",
+        showarrow=False,
+        xanchor="left", yanchor="middle",
+        xshift=12, textangle=90,
+        font=dict(family="'IBM Plex Mono'", size=9, color="#1a1a1a"),
+    )
+
+    # Worst cell highlight — destaca a pior celula com setinha
+    if z_arr.size > 0:
+        worst_idx = np.unravel_index(np.argmax(z_arr), z_arr.shape)
+        worst_y = cf_pivot.index[worst_idx[0]]
+        worst_x_col = cf_pivot.columns[worst_idx[1]]
+        worst_x_label = dow_labels[worst_x_col]
+        worst_val = z_arr[worst_idx]
+        # So adiciona setinha se o pico for relevante (>= 15%)
+        if worst_val >= 15:
+            fig.add_annotation(
+                x=x_lab[worst_idx[1]], y=worst_y,
+                text=f"<b>worst: {worst_x_label} {worst_y}h<br>{worst_val:.0f}%</b>",
+                showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=1.5,
+                arrowcolor=EL["accent_today"],
+                ax=60, ay=-40,
+                bgcolor="#fafaf6", borderpad=6, borderwidth=1,
+                bordercolor=EL["accent_today"],
+                font=dict(family="'IBM Plex Mono'", size=10,
+                          color=EL["accent_today"]),
+            )
+
+    # Subtitle dinamico com periodo coberto
+    n_buckets = int(np.count_nonzero(z_arr))
+    subtitle = (f"<span style='font-size:11px;color:#857d72'>"
+                f"cell value = average CF lost to curtailment (%) "
+                f"· {n_buckets} active buckets</span>")
+
     lay = dict(LAY); lay.update(
-        title=ed_title("Weekday × hour heatmap — weekly pattern", 20),
+        title=dict(
+            text=(f"<span style='font-size:20px;font-family:Fraunces,serif;"
+                  f"color:#1a1715'>Weekday × hour heatmap — weekly pattern</span>"
+                  f"<br>{subtitle}"),
+            x=0.02, xanchor="left", y=0.97
+        ),
         yaxis=dict(title="Hour of day", dtick=2, autorange="reversed",
-                    gridcolor=EL["border"]),
-        xaxis=dict(title="", gridcolor=EL["border"]),
-        height=420, margin=dict(l=70, r=30, t=60, b=50),
+                    gridcolor=EL["border"], range=[23.5, -0.5]),
+        xaxis=dict(title="", gridcolor=EL["border"], side="top"),
+        height=480, margin=dict(l=70, r=130, t=90, b=40),
     )
     fig.update_layout(**lay); return fig
 
@@ -2146,23 +2375,36 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   text-transform:uppercase;line-height:1.8}
 .hero .byline span{color:var(--ink)}
 
-/* Trend sparkline strip */
+/* Trend sparkline strip — visual hierarchy with bigger numbers */
 .trend-strip{display:grid;grid-template-columns:repeat(3,1fr);
-  gap:24px;margin:0 0 48px;padding:24px 28px;
+  gap:24px;margin:0 0 48px;padding:28px 32px;
   background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
-.trend-cell{display:flex;flex-direction:column;gap:6px}
+.trend-cell{display:flex;flex-direction:column;gap:6px;position:relative}
 .trend-cell .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
-  color:var(--muted);letter-spacing:0.18em;text-transform:uppercase}
+  color:var(--muted);letter-spacing:0.18em;text-transform:uppercase;
+  display:flex;align-items:center;gap:8px}
+.trend-cell .lbl .arrow{display:inline-block;font-size:14px;line-height:1;
+  font-weight:600;letter-spacing:0}
+.trend-cell .lbl .arrow.up{color:var(--accent-today)}
+.trend-cell .lbl .arrow.down{color:var(--ok)}
+.trend-cell .lbl .arrow.flat{color:var(--muted)}
 .trend-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:32px;line-height:1;letter-spacing:-0.01em;
+  font-size:42px;line-height:1;letter-spacing:-0.015em;
   font-variation-settings:"opsz" 72}
-.trend-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
-  color:var(--muted);font-weight:400;margin-left:4px}
+/* Semantic colour: piorando (up) = red, melhorando (down) = green */
+.trend-cell.t-up .val{color:var(--accent-today)}
+.trend-cell.t-down .val{color:var(--ok)}
+.trend-cell.t-flat .val{color:var(--ink)}
+.trend-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:15px;
+  color:var(--muted);font-weight:400;margin-left:5px}
 .trend-cell .delta{font-family:'IBM Plex Mono',monospace;font-size:11px;
-  letter-spacing:0.04em}
+  letter-spacing:0.04em;color:var(--muted)}
 .trend-cell .delta.up{color:var(--accent-today);font-weight:500}
 .trend-cell .delta.down{color:var(--ok);font-weight:500}
 .trend-cell .delta.flat{color:var(--muted)}
+.trend-cell .baseline{font-family:'IBM Plex Mono',monospace;font-size:9px;
+  color:var(--muted);opacity:0.7;letter-spacing:0.05em;margin-top:4px;
+  border-top:1px dashed var(--rule);padding-top:4px}
 .trend-banner{margin:-24px 0 32px;padding:14px 20px;border-radius:2px;
   font-family:'IBM Plex Mono',monospace;font-size:11px;
   letter-spacing:0.12em;text-transform:uppercase;font-weight:500;
@@ -2400,6 +2642,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border:1px dashed var(--rule);font-family:'IBM Plex Sans',sans-serif;
   font-size:11px;line-height:1.55;color:var(--muted);font-style:italic}
 #ppa-volume-group.hidden{opacity:0.4;pointer-events:none}
+.ppa-sensitivity-wrap{margin:32px 0 0;padding:24px 0 0;
+  border-top:1px solid var(--rule)}
+.ppa-sensitivity-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:17px;margin:0 0 8px;color:var(--ink)}
+.ppa-sens-desc{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+  line-height:1.55;color:var(--muted);margin:0 0 14px;max-width:780px}
+.ppa-sens-hint{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);margin:8px 0 0;letter-spacing:0.05em;text-align:center}
 
 footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
   font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
@@ -2501,20 +2751,33 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       </span>
     </div>
     <div class="trend-strip">
-      <div class="trend-cell">
-        <div class="lbl" data-i18n="trend_30d">Last 30 days</div>
+      {# Decide colour direction: piorando (worse) = up/red, melhorando (better) = down/green #}
+      {% set tdir = 'up' if trend.tendencia == 'piorando' else ('down' if trend.tendencia == 'melhorando' else 'flat') %}
+      {% set tarrow = '↗' if tdir == 'up' else ('↘' if tdir == 'down' else '→') %}
+      <div class="trend-cell t-{{ tdir }}">
+        <div class="lbl">
+          <span data-i18n="trend_30d">Last 30 days</span>
+          <span class="arrow {{ tdir }}">{{ tarrow }}</span>
+        </div>
         <div class="val">{{ "%.2f"|format(trend.cf_d30) }}<span class="unit">%</span></div>
         <div class="delta">CF · {{ "%.0f"|format(trend.mwh_d30/1000) }} GWh <span data-i18n="trend_curtailed">curtailed</span></div>
+        <div class="baseline">365d baseline: {{ "%.2f"|format(trend.cf_d365) }}%</div>
       </div>
-      <div class="trend-cell">
-        <div class="lbl" data-i18n="trend_90d">Last 90 days</div>
+      <div class="trend-cell t-flat">
+        <div class="lbl">
+          <span data-i18n="trend_90d">Last 90 days</span>
+        </div>
         <div class="val">{{ "%.2f"|format(trend.cf_d90) }}<span class="unit">%</span></div>
         <div class="delta">CF · {{ "%.0f"|format(trend.mwh_d90/1000) }} GWh <span data-i18n="trend_curtailed">curtailed</span></div>
+        <div class="baseline">mid-term window</div>
       </div>
-      <div class="trend-cell">
-        <div class="lbl" data-i18n="trend_365d">Last 365 days</div>
+      <div class="trend-cell t-flat">
+        <div class="lbl">
+          <span data-i18n="trend_365d">Last 365 days</span>
+        </div>
         <div class="val">{{ "%.2f"|format(trend.cf_d365) }}<span class="unit">%</span></div>
         <div class="delta">CF · {{ "%.0f"|format(trend.mwh_d365/1000) }} GWh <span data-i18n="trend_curtailed">curtailed</span></div>
+        <div class="baseline">structural baseline</div>
       </div>
     </div>
     {% endif %}
@@ -2675,7 +2938,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       a structural weekly phenomenon (e.g. weekends with lower industrial load
       mean more solar surplus and more cuts).
     </p>
-    <div class="chart"><div id="heatmap_dow" style="height:440px"></div></div>
+    <div class="chart"><div id="heatmap_dow" style="height:460px"></div></div>
 
   </div><!-- /tab curt -->
 
@@ -2979,6 +3242,23 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
             <tbody id="ppa-monthly-rows"></tbody>
           </table>
         </div>
+      </div>
+
+      <!-- Sensitivity Matrix -->
+      <div class="ppa-sensitivity-wrap">
+        <h4 data-i18n="ppa_sens_title">Sensitivity matrix: price × volume</h4>
+        <p class="ppa-sens-desc" data-i18n="ppa_sens_desc">
+          Δ revenue (PPA vs MCP) for the full grid of contracted price and
+          volume in the selected submarket. Green zone = PPA wins; red zone =
+          MCP wins. The black line marks break-even (Δ = 0). The star ★ shows
+          the current simulator point.
+        </p>
+        <div id="g_ppa_sensitivity" style="width:100%;height:520px"></div>
+        <p class="ppa-sens-hint" data-i18n="ppa_sens_hint">
+          Hover any cell to see the exact Δ. Click sliders above to move the ★
+          and explore. The matrix recomputes when you change submarket or
+          contract type.
+        </p>
       </div>
 
       <p class="ppa-disclaimer" data-i18n="ppa_disclaimer">
@@ -3548,6 +3828,9 @@ const I18N = {
     ppa_add_hint: "Combine dois contratos em submercados diferentes",
     ppa_second_label: "2º PPA",
     ppa_remove_second: "Remover 2º PPA",
+    ppa_sens_title: "Matriz de sensibilidade: preço × volume",
+    ppa_sens_desc: "Δ receita (PPA vs MCP) para a grade completa de preço e volume contratados no submercado selecionado. Zona verde = PPA vence; zona vermelha = MCP vence. A linha preta marca o break-even (Δ = 0). A estrela ★ indica o ponto atual do simulador.",
+    ppa_sens_hint: "Passe o mouse sobre qualquer célula para ver o Δ exato. Use os sliders acima para mover a ★ e explorar. A matriz recalcula quando você muda o submercado ou tipo de contrato.",
     ppa_kpi_mcp: "Receita real MCP (sem PPA)",
     ppa_kpi_mcp_hint: "Conforme observado no período",
     ppa_kpi_ppa: "Receita simulada (com PPA)",
@@ -3948,6 +4231,180 @@ function ppaRender() {
       existing.remove();
     }
   }
+
+  // Re-render the sensitivity matrix
+  ppaSensitivity();
+}
+
+// ============================================================
+// PPA Sensitivity Matrix (heatmap 2D price x volume)
+// ============================================================
+function ppaSensitivity() {
+  const el = document.getElementById('g_ppa_sensitivity');
+  if (!el || !MOD_MENSAL || MOD_MENSAL.length === 0) return;
+
+  const { type, submercado, price, volume } = ppaState;
+  const lang = document.body.dataset.lang || 'en';
+
+  // Pre-compute totals invariant for the grid
+  const totalGen = MOD_MENSAL.reduce((s, m) => s + m.mwh_total, 0);
+  const totalMcp = MOD_MENSAL.reduce((s, m) => s + m.receita_real, 0);
+  const sumPldSub = MOD_MENSAL.reduce(
+    (s, m) => s + ppaPldSub(m, submercado), 0);
+  const meanPldSub = sumPldSub / MOD_MENSAL.length;
+  const nMonths = MOD_MENSAL.length;
+
+  // Build grid
+  const priceMin = 100, priceMax = 350, priceStep = 12.5;  // 21 points
+  const volMin = 0,    volMax = 50000, volStep = 2500;     // 21 points
+  const prices = [], volumes = [];
+  for (let p = priceMin; p <= priceMax; p += priceStep) prices.push(p);
+  for (let v = volMin;   v <= volMax;   v += volStep)   volumes.push(v);
+
+  // Delta function for current submercado choice
+  // Caso A: delta = sum_i [vol × (P - PLD_sub_i)]
+  //               = vol × (P × N - sumPldSub)
+  //               = vol × N × (P - meanPldSub)
+  // Caso B: delta = sum_i [gen_i × (P - PLD_efetivo_i)]
+  //               = P × totalGen - totalMcp
+  function deltaAt(P, V) {
+    if (type === 'B') {
+      // Volume irrelevant in all-take mode
+      return P * totalGen - totalMcp;
+    } else {
+      return V * nMonths * (P - meanPldSub);
+    }
+  }
+
+  // Build z matrix (volumes as rows, prices as cols)
+  const z = volumes.map(v =>
+    prices.map(p => deltaAt(p, v) / 1e6)  // R$ M
+  );
+
+  // For colour scale: symmetric around 0
+  const flat = z.flat();
+  const absMax = Math.max(Math.abs(Math.min(...flat)),
+                          Math.abs(Math.max(...flat)));
+
+  // Build hover text (rich tooltip)
+  const customdata = volumes.map((v, iy) =>
+    prices.map((p, ix) => {
+      const dRs = z[iy][ix] * 1e6;
+      const roi = totalMcp > 0 ? (100 * dRs / totalMcp) : 0;
+      return {p: p, v: v, d_rs: dRs, roi: roi};
+    })
+  );
+
+  const hoverTemplate = lang === 'pt'
+    ? '<b>Preço:</b> R$ %{x:.0f}/MWh<br>' +
+      '<b>Volume:</b> %{y:,.0f} MWh/mês<br>' +
+      '<b>Δ Receita:</b> R$ %{customdata.d_rs:,.2s}<br>' +
+      '<b>ROI vs MCP:</b> %{customdata.roi:+.1f}%' +
+      '<extra></extra>'
+    : '<b>Price:</b> R$ %{x:.0f}/MWh<br>' +
+      '<b>Volume:</b> %{y:,.0f} MWh/month<br>' +
+      '<b>Δ Revenue:</b> R$ %{customdata.d_rs:,.2s}<br>' +
+      '<b>ROI vs MCP:</b> %{customdata.roi:+.1f}%' +
+      '<extra></extra>';
+
+  const heatmap = {
+    type: 'heatmap',
+    x: prices,
+    y: volumes,
+    z: z,
+    customdata: customdata,
+    hovertemplate: hoverTemplate,
+    colorscale: [
+      [0.0, '#7a1a0a'],   // dark red
+      [0.25, '#d92e0f'],  // accent_today
+      [0.5, '#f5efe0'],   // neutral panel
+      [0.75, '#5a8a6a'],  // soft green
+      [1.0, '#1f3d29']    // dark green
+    ],
+    zmid: 0,
+    zmin: -absMax,
+    zmax: absMax,
+    colorbar: {
+      title: {text: lang === 'pt' ? 'Δ R$ M' : 'Δ R$ M',
+              font: {family: 'IBM Plex Mono', size: 11}},
+      thickness: 14, len: 0.85,
+      tickfont: {family: 'IBM Plex Mono', size: 10}
+    }
+  };
+
+  // Break-even line (Caso A: vertical at P = meanPldSub)
+  // (Caso B: vertical at P = totalMcp/totalGen = pld_efetivo geral)
+  const beX = type === 'B'
+    ? (totalGen > 0 ? totalMcp / totalGen : meanPldSub)
+    : meanPldSub;
+  const breakEvenLine = {
+    type: 'scatter', mode: 'lines',
+    x: [beX, beX], y: [volMin, volMax],
+    line: {color: '#1a1a1a', width: 2, dash: 'solid'},
+    name: lang === 'pt' ? 'Break-even' : 'Break-even',
+    hovertemplate: (lang === 'pt'
+      ? 'Break-even = R$ %{x:.0f}/MWh'
+      : 'Break-even = R$ %{x:.0f}/MWh') + '<extra></extra>',
+    showlegend: true
+  };
+
+  // Current simulator point ★
+  const star = {
+    type: 'scatter', mode: 'markers+text',
+    x: [price], y: [type === 'B' ? volMax * 0.5 : volume],
+    marker: {symbol: 'star', size: 22, color: '#d92e0f',
+             line: {color: '#1a1a1a', width: 1.5}},
+    text: [lang === 'pt' ? 'Atual' : 'Current'],
+    textposition: 'top center',
+    textfont: {family: 'IBM Plex Mono', size: 10, color: '#1a1a1a'},
+    name: lang === 'pt' ? 'Ponto atual' : 'Current point',
+    hovertemplate: (lang === 'pt'
+      ? 'Configuração atual<br>P=R$ %{x:.0f} V=%{y:,.0f}'
+      : 'Current setting<br>P=R$ %{x:.0f} V=%{y:,.0f}') + '<extra></extra>',
+    showlegend: true
+  };
+
+  const subLabel = {
+    NE: 'NE', SECO: 'SE/CO', S: 'S', N: 'N'
+  }[submercado] || submercado;
+  const typeLabel = type === 'B'
+    ? (lang === 'pt' ? 'All-take' : 'All-take')
+    : (lang === 'pt' ? 'Volume limitado' : 'Volume limited');
+
+  const layout = {
+    title: {
+      text: (lang === 'pt'
+        ? `Δ Receita anual (R$ M) — ${typeLabel} · entrega no ${subLabel} · ${nMonths} meses`
+        : `Annual Δ revenue (R$ M) — ${typeLabel} · delivery in ${subLabel} · ${nMonths} months`),
+      font: {family: 'IBM Plex Mono', size: 12, color: '#1a1a1a'},
+      x: 0.02, xanchor: 'left'
+    },
+    xaxis: {
+      title: {text: lang === 'pt' ? 'Preço PPA (R$/MWh)' : 'PPA price (R$/MWh)',
+              font: {family: 'IBM Plex Mono', size: 11}},
+      tickfont: {family: 'IBM Plex Mono', size: 10}
+    },
+    yaxis: {
+      title: {text: lang === 'pt' ? 'Volume contratado (MWh/mês)' : 'Contracted volume (MWh/month)',
+              font: {family: 'IBM Plex Mono', size: 11}},
+      tickfont: {family: 'IBM Plex Mono', size: 10},
+      tickformat: ',d'
+    },
+    margin: {l: 100, r: 60, t: 50, b: 60},
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    showlegend: true,
+    legend: {
+      x: 0.5, y: -0.18, xanchor: 'center', orientation: 'h',
+      font: {family: 'IBM Plex Mono', size: 10}
+    }
+  };
+
+  Plotly.react(el, [heatmap, breakEvenLine, star], layout, {
+    responsive: true, displaylogo: false,
+    modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d',
+                              'zoomIn2d', 'zoomOut2d']
+  });
 }
 
 function ppaInit() {
