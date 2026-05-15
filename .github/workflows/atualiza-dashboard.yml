@@ -2,13 +2,16 @@ name: Atualiza Dashboard Curtailment Mauriti
 
 on:
   schedule:
-    # Toda segunda-feira as 12:00 UTC = 09:00 BRT
-    - cron: '0 12 * * 1'
+    # Diariamente as 12:15 UTC = 09:15 BRT
+    # Atrasamos 15 min em relacao ao horario anterior pra garantir que
+    # o CCEE Dados Abertos ja publicou o PLD do dia anterior
+    - cron: '15 12 * * *'
   workflow_dispatch:  # permite rodar manualmente pela aba Actions
   push:
     branches: [main, master]
     paths:
       - 'gerar_dashboard_curtailment.py'
+      - 'enviar_email.py'
       - 'requirements.txt'
       - '.github/workflows/atualiza-dashboard.yml'
 
@@ -19,6 +22,10 @@ concurrency:
   group: dashboard-deploy
   cancel-in-progress: false
 
+# Forca Node 24 para silenciar avisos de deprecacao do Node 20
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -26,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout do repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -54,6 +61,7 @@ jobs:
         run: |
           ls -la public/
           test -f public/index.html || (echo "ERRO: public/index.html nao foi gerado" && exit 1)
+          test -f public/daily_summary.json || (echo "AVISO: daily_summary.json nao foi gerado")
           echo "Tamanho do HTML: $(du -h public/index.html | cut -f1)"
 
       - name: Publica no GitHub Pages (branch gh-pages)
@@ -69,3 +77,26 @@ jobs:
 
             Trigger: ${{ github.event_name }}
             Sha: ${{ github.sha }}
+
+      - name: Commita pld_data atualizado de volta no main
+        # Toda execucao do gerar_dashboard baixa o PLD mais novo do
+        # portal Dados Abertos CCEE e sobrescreve ./pld_data/. Aqui
+        # commitamos esse arquivo de volta no main pra ter historico.
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add pld_data/ || true
+          if git diff --staged --quiet; then
+            echo "pld_data sem mudancas, pulando commit"
+          else
+            git commit -m "auto-update PLD data (run #${{ github.run_number }})"
+            git push
+          fi
+
+      - name: Envia email diario
+        if: success()
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+        run: python enviar_email.py
