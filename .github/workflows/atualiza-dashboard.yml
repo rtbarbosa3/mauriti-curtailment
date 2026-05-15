@@ -22,7 +22,6 @@ concurrency:
   group: dashboard-deploy
   cancel-in-progress: false
 
-# Forca Node 24 para silenciar avisos de deprecacao do Node 20
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -79,9 +78,7 @@ jobs:
             Sha: ${{ github.sha }}
 
       - name: Commita pld_data atualizado de volta no main
-        # Toda execucao do gerar_dashboard baixa o PLD mais novo do
-        # portal Dados Abertos CCEE e sobrescreve ./pld_data/. Aqui
-        # commitamos esse arquivo de volta no main pra ter historico.
+        continue-on-error: true
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
@@ -93,10 +90,18 @@ jobs:
             git push
           fi
 
-      - name: Envia email diario
+      - name: Envia email diario (opcional)
         if: success()
+        continue-on-error: true
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
-        run: python enviar_email.py
+        run: |
+          if [ -z "$GMAIL_USER" ] || [ -z "$GMAIL_APP_PASSWORD" ] || [ -z "$EMAIL_RECIPIENTS" ]; then
+            echo "[!] Secrets de email nao configurados. Pulando envio."
+            echo "    Pra ativar email diario, configure os GitHub Secrets:"
+            echo "      GMAIL_USER, GMAIL_APP_PASSWORD, EMAIL_RECIPIENTS"
+            exit 0
+          fi
+          python enviar_email.py
