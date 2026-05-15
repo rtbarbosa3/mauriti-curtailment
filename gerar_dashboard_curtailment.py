@@ -352,7 +352,8 @@ def carregar_detalhe(cfg: dict, dt_ini: date, dt_fim: date,
 def carregar_solar_ne_agregado(cfg: dict, dt_ini: date, dt_fim: date,
                                   pld: pd.DataFrame) -> pd.DataFrame:
     """Carrega o universo de UFVs do submercado NE e agrega por hora.
-    Retorna DF compacto com colunas: hora, mwh_total_ne, n_usinas.
+    Retorna DF compacto com colunas: hora, mwh_total_ne, mwh_estim_ne,
+    mwh_curt_ne, n_usinas.
     Diferente de carregar_detalhe: NAO filtra por patterns, mas agrega
     imediatamente cada mes (mantendo memoria baixa)."""
     cache = _ensure_dir(cfg["cache_dir"])
@@ -370,22 +371,32 @@ def carregar_solar_ne_agregado(cfg: dict, dt_ini: date, dt_fim: date,
             df = df[df["id_subsistema"].astype(str).str.upper().str.strip() == "NE"]
         if df.empty:
             continue
-        # Calcula geracao em MWh e agrega por hora cheia
+        # Calcula geracao em MWh, estimada e curtailment (cada base 30min -> 0.5h)
         df["geracao_mwh"] = (pd.to_numeric(df["val_geracaoverificada"],
                                               errors="coerce")
                                 .clip(lower=0) * 0.5)
+        df["estimada_mwh"] = (pd.to_numeric(df["val_geracaoestimada"],
+                                              errors="coerce")
+                                .clip(lower=0) * 0.5)
+        df["curtailment_mwh"] = (df["estimada_mwh"]
+                                    - df["geracao_mwh"]).clip(lower=0)
         df["hora"] = df["din_instante"].dt.floor("h")
         agg = df.groupby("hora").agg(
             mwh_total_ne=("geracao_mwh", "sum"),
+            mwh_estim_ne=("estimada_mwh", "sum"),
+            mwh_curt_ne=("curtailment_mwh", "sum"),
             n_usinas=("nom_usina", "nunique"),
         ).reset_index()
         rows.append(agg)
         del df  # libera memoria
     if not rows:
-        return pd.DataFrame(columns=["hora", "mwh_total_ne", "n_usinas"])
+        return pd.DataFrame(columns=["hora", "mwh_total_ne", "mwh_estim_ne",
+                                       "mwh_curt_ne", "n_usinas"])
     out = (pd.concat(rows, ignore_index=True)
               .groupby("hora")
               .agg(mwh_total_ne=("mwh_total_ne", "sum"),
+                   mwh_estim_ne=("mwh_estim_ne", "sum"),
+                   mwh_curt_ne=("mwh_curt_ne", "sum"),
                    n_usinas=("n_usinas", "max"))
               .reset_index()
               .sort_values("hora"))
@@ -2536,17 +2547,39 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border-top:1px dashed var(--rule);padding-top:4px}
 
 /* =========================== BENCHMARK TAB =========================== */
-.bench-selector{display:flex;align-items:center;gap:18px;margin:24px 0 32px;
-  padding:20px 24px;background:var(--bg-alt);border:1px solid var(--rule);
-  border-radius:2px;flex-wrap:wrap}
+.bench-selector{margin:24px 0 32px;padding:22px 24px;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px}
+.bench-selector-head{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--rule);
+  flex-wrap:wrap;gap:10px}
 .bench-selector label{font-family:'IBM Plex Mono',monospace;font-size:11px;
   color:var(--ink);letter-spacing:0.16em;text-transform:uppercase;font-weight:500}
-.bench-select{padding:10px 14px;border:1px solid var(--rule);
-  background:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:13px;
-  color:var(--ink);border-radius:2px;min-width:280px;cursor:pointer}
-.bench-select:focus{outline:2px solid var(--accent-today);outline-offset:1px}
+.bench-selector-meta{display:flex;gap:8px;flex-wrap:wrap}
+.bench-btn-mini{padding:6px 12px;border:1px solid var(--rule);background:var(--panel);
+  font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.1em;
+  color:var(--ink);cursor:pointer;border-radius:2px;text-transform:uppercase;
+  transition:all 0.15s}
+.bench-btn-mini:hover{background:var(--bg);border-color:var(--accent)}
+.bench-checkboxes{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+  gap:8px 18px;margin:8px 0 14px}
+.bench-checkbox-row{display:flex;align-items:center;gap:10px;padding:8px 10px;
+  border-radius:2px;cursor:pointer;transition:background 0.12s}
+.bench-checkbox-row:hover{background:rgba(168,68,47,0.05)}
+.bench-checkbox-row input[type=checkbox]{margin:0;cursor:pointer;
+  width:14px;height:14px;accent-color:var(--accent)}
+.bench-cb-label{display:flex;flex-direction:column;gap:2px;flex:1}
+.bench-cb-label > span:first-child{font-family:'IBM Plex Sans',sans-serif;
+  font-size:12px;color:var(--ink);font-weight:500}
+.bench-cb-meta{font-family:'IBM Plex Mono',monospace;font-size:9px;
+  color:var(--muted);letter-spacing:0.04em}
+.bench-cb-swatch{display:inline-block;width:10px;height:10px;border-radius:50%;
+  flex-shrink:0}
+.bench-fleet-toggle{margin-top:14px;padding-top:12px;
+  border-top:1px dashed var(--rule)}
+.bench-fleet-row{background:rgba(217,46,15,0.03)}
+.bench-fleet-row:hover{background:rgba(217,46,15,0.06)}
 .bench-meta{font-family:'IBM Plex Mono',monospace;font-size:11px;
-  color:var(--muted);letter-spacing:0.04em;font-style:italic}
+  color:var(--muted);letter-spacing:0.04em;font-style:italic;margin:14px 0 0}
 .bench-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;
   margin:0 0 24px}
 @media(max-width:900px){.bench-cards{grid-template-columns:1fr}}
@@ -2571,7 +2604,6 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-variation-settings:"opsz" 72}
 .bench-row .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:11px;
   color:var(--muted);font-weight:400;margin-left:3px}
-/* Semantic colour for diff values: red = Mauriti worse, green = better */
 .bench-row.diff-worse .val{color:var(--accent-today)}
 .bench-row.diff-better .val{color:var(--ok)}
 .bench-row.diff-neutral .val{color:var(--muted)}
@@ -2583,12 +2615,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   line-height:1.55;color:var(--muted);margin:0 0 14px;max-width:780px}
 .bench-table tbody tr{cursor:pointer;transition:background 0.15s}
 .bench-table tbody tr:hover{background:var(--bg-alt)}
-.bench-table tbody tr.active-bench{background:rgba(168,68,47,0.08);
-  border-left:3px solid var(--accent)}
+.bench-table tbody tr.active-bench{background:rgba(168,68,47,0.08)}
 .bench-table tbody tr.is-mauriti{background:rgba(168,68,47,0.04);
   font-weight:500}
-.bench-table tbody tr.is-mauriti td:first-child::before{content:"★ ";
+.bench-table tbody tr.is-ne-fleet{background:rgba(217,46,15,0.04);
+  font-style:italic}
+.bench-table tbody tr.is-mauriti td:first-child::before{content:"★";
   color:var(--accent)}
+.bench-table tbody tr.is-ne-fleet td:first-child::before{content:"⬢";
+  color:var(--accent-today)}
+.bench-table tbody tr td:first-child{text-align:center;width:24px;
+  padding-right:0}
 .trend-banner{margin:-24px 0 32px;padding:14px 20px;border-radius:2px;
   font-family:'IBM Plex Mono',monospace;font-size:11px;
   letter-spacing:0.12em;text-transform:uppercase;font-weight:500;
@@ -3837,14 +3874,33 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
     <!-- Group selector -->
     <div class="bench-selector">
-      <label data-i18n="bench_select_label">Compare Mauriti against:</label>
-      <select id="bench-group" class="bench-select">
-        <!-- options inserted by JS from BENCH_KPIS -->
-      </select>
-      <span class="bench-meta" id="bench-meta"></span>
+      <div class="bench-selector-head">
+        <label data-i18n="bench_select_label">Compare Mauriti against:</label>
+        <div class="bench-selector-meta">
+          <button class="bench-btn-mini" id="bench-select-all" type="button"
+                  data-i18n="bench_btn_all">Select all</button>
+          <button class="bench-btn-mini" id="bench-select-none" type="button"
+                  data-i18n="bench_btn_none">Clear</button>
+          <button class="bench-btn-mini" id="bench-select-ufv" type="button"
+                  data-i18n="bench_btn_ufv">Solar only</button>
+        </div>
+      </div>
+      <div class="bench-checkboxes" id="bench-checkboxes">
+        <!-- checkboxes inserted by JS -->
+      </div>
+      <div class="bench-fleet-toggle">
+        <label class="bench-checkbox-row bench-fleet-row">
+          <input type="checkbox" id="bench-show-ne-fleet" checked>
+          <span class="bench-cb-label">
+            <span data-i18n="bench_show_ne">Show NE solar fleet average</span>
+            <span class="bench-cb-meta" id="bench-ne-meta"></span>
+          </span>
+        </label>
+      </div>
+      <p class="bench-meta" id="bench-meta"></p>
     </div>
 
-    <!-- 3 KPI cards: Mauriti / Peer / Diff -->
+    <!-- 3 KPI cards: Mauriti / Selected avg / Diff -->
     <div class="bench-cards">
       <div class="bench-card bench-card-mauriti">
         <div class="bench-card-label" data-i18n="bench_card_mauriti">MAURITI</div>
@@ -3852,30 +3908,34 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
         <div class="bench-rows" id="bench-mauriti-rows"></div>
       </div>
       <div class="bench-card bench-card-peer">
-        <div class="bench-card-label" id="bench-peer-label">PEER</div>
+        <div class="bench-card-label" id="bench-peer-label" data-i18n="bench_card_selected">SELECTED PEERS</div>
         <div class="bench-card-sub" id="bench-peer-sub"></div>
         <div class="bench-rows" id="bench-peer-rows"></div>
       </div>
       <div class="bench-card bench-card-diff">
         <div class="bench-card-label" data-i18n="bench_card_diff">DIFFERENCE</div>
-        <div class="bench-card-sub" data-i18n="bench_card_diff_sub">Mauriti − Peer</div>
+        <div class="bench-card-sub" data-i18n="bench_card_diff_sub">Mauriti − Peer avg</div>
         <div class="bench-rows" id="bench-diff-rows"></div>
       </div>
     </div>
 
-    <!-- Comparison chart (CF, Curt MWh, Modulation %) -->
-    <div id="g_bench_compare" style="width:100%;height:380px;margin:32px 0"></div>
+    <!-- Time series chart: monthly CF since jul/2025 -->
+    <div id="g_bench_monthly" style="width:100%;height:480px;margin:32px 0 16px"></div>
+
+    <!-- Bar comparison chart (annual totals) -->
+    <div id="g_bench_compare" style="width:100%;height:380px;margin:16px 0 32px"></div>
 
     <!-- All groups context table -->
     <div class="bench-table-wrap">
-      <h4 data-i18n="bench_table_title">All 7 peer groups — KPIs at a glance</h4>
+      <h4 data-i18n="bench_table_title">All peer groups — annual KPIs</h4>
       <p class="bench-table-desc" data-i18n="bench_table_desc">
-        Reference table with all peer groups including Mauriti.
-        Click any row to make that group the active comparison above.</p>
+        Reference table with all peer groups including Mauriti and the
+        NE solar fleet aggregate. Click any row to toggle its selection.</p>
       <div class="events-table-wrap">
         <table class="events-table bench-table">
           <thead>
             <tr>
+              <th></th>
               <th data-i18n="bench_th_group">Group</th>
               <th data-i18n="bench_th_source">Source</th>
               <th class="num" data-i18n="bench_th_n_plants"># plants</th>
@@ -3994,6 +4054,11 @@ const I18N = {
     bench_th_gen: "Geração total (GWh)",
     bench_th_curt: "Cortado (GWh)",
     bench_th_cf: "CF (%)",
+    bench_card_selected: "PEERS SELECIONADOS",
+    bench_btn_all: "Todos",
+    bench_btn_none: "Limpar",
+    bench_btn_ufv: "Só solar",
+    bench_show_ne: "Mostrar média da frota NE solar",
     period: "Período",
     of: "de",
     of_lower: "de",
@@ -4783,52 +4848,157 @@ ppaInit();
 window.addEventListener('mauriti-lang-changed', ppaRender);
 
 // ============================================================
-// BENCHMARK BUILDER (Tab: bench)
+// BENCHMARK BUILDER (Tab: bench) — multi-select + time series
 // ============================================================
-const benchState = { activeId: null };
+const benchState = {
+  selectedIds: new Set(),   // peers ticados pelo usuario
+  showNeFleet: true,        // toggle linha NE fleet
+};
+
+// Palette of distinct colours for selected peers in the chart
+const BENCH_PALETTE = [
+  '#5b6b7d',  // gray-blue
+  '#9a8467',  // earth
+  '#6b9080',  // sage
+  '#a87a55',  // tan
+  '#7a6b8e',  // muted purple
+  '#5e7c8a',  // slate
+  '#8a6f5d',  // brown
+  '#6b8278',  // dark sage
+];
+function colourFor(idx) { return BENCH_PALETTE[idx % BENCH_PALETTE.length]; }
 
 function _fmtGwh(mwh) { return (mwh / 1000).toFixed(1); }
-function _fmtMrs(rs) { return (rs / 1e6).toFixed(2); }
 function _fmtPct(v) { return v.toFixed(2); }
 
-function benchPopulateDropdown() {
-  const sel = document.getElementById('bench-group');
-  if (!sel || !BENCH_KPIS || BENCH_KPIS.length === 0) return;
-  // Exclui Mauriti das opcoes (eh sempre a base)
-  const peers = BENCH_KPIS.filter(g => !g.is_mauriti);
-  sel.innerHTML = peers.map(g =>
-    `<option value="${g.id}">${g.label} (${g.fonte} · ${g.n_plants} plants)</option>`
-  ).join('');
-  if (peers.length > 0) {
-    benchState.activeId = peers[0].id;
-    sel.value = benchState.activeId;
+// Aggregate KPIs from a list of peer entries (weighted by gen if relevant)
+function aggregatePeers(peerList) {
+  if (peerList.length === 0) {
+    return null;
   }
+  let totalGen = 0, totalCurt = 0, totalPlants = 0;
+  for (const p of peerList) {
+    totalGen += p.mwh_gen;
+    totalCurt += p.mwh_curt;
+    totalPlants += p.n_plants;
+  }
+  const cf = totalGen > 0 ? (100 * totalCurt / totalGen) : 0;
+  return {
+    mwh_gen: totalGen, mwh_curt: totalCurt, n_plants: totalPlants, cf: cf,
+    n_groups: peerList.length,
+  };
+}
+
+// Build monthly aggregated time series from multiple peer entries
+function aggregateMonthly(peerList) {
+  const byMonth = new Map();
+  for (const p of peerList) {
+    if (!p.monthly || p.monthly.length === 0) continue;
+    for (const m of p.monthly) {
+      if (!byMonth.has(m.mes)) {
+        byMonth.set(m.mes, {mes: m.mes, mwh_gen: 0, mwh_curt: 0});
+      }
+      const acc = byMonth.get(m.mes);
+      acc.mwh_gen += m.mwh_gen;
+      acc.mwh_curt += m.mwh_curt;
+    }
+  }
+  const result = [...byMonth.values()].sort((a, b) => a.mes.localeCompare(b.mes));
+  for (const r of result) {
+    r.cf = r.mwh_gen > 0 ? (100 * r.mwh_curt / r.mwh_gen) : 0;
+  }
+  return result;
+}
+
+function benchPopulateCheckboxes() {
+  const wrap = document.getElementById('bench-checkboxes');
+  if (!wrap || !BENCH_KPIS || BENCH_KPIS.length === 0) return;
+  // Exclui Mauriti e NE fleet (eles tem UI propria)
+  const peers = BENCH_KPIS.filter(g => !g.is_mauriti && !g.is_ne_fleet);
+  // Pre-seleciona os primeiros 2 peers por default
+  if (benchState.selectedIds.size === 0 && peers.length > 0) {
+    benchState.selectedIds.add(peers[0].id);
+    if (peers.length > 1) benchState.selectedIds.add(peers[1].id);
+  }
+  wrap.innerHTML = peers.map((g, idx) => {
+    const checked = benchState.selectedIds.has(g.id) ? 'checked' : '';
+    return `
+      <label class="bench-checkbox-row" data-peer-id="${g.id}">
+        <input type="checkbox" value="${g.id}" ${checked}
+               class="bench-peer-cb">
+        <span class="bench-cb-label">
+          <span><span class="bench-cb-swatch" data-cb-swatch="${g.id}"></span>
+            ${g.label}</span>
+          <span class="bench-cb-meta">${g.fonte} · ${g.n_plants} plants · CF ${g.cf.toFixed(1)}%</span>
+        </span>
+      </label>`;
+  }).join('');
+  // Attach handlers
+  wrap.querySelectorAll('.bench-peer-cb').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) benchState.selectedIds.add(cb.value);
+      else benchState.selectedIds.delete(cb.value);
+      benchRender();
+    });
+  });
+}
+
+function _benchSetSelection(filterFn) {
+  const peers = BENCH_KPIS.filter(g => !g.is_mauriti && !g.is_ne_fleet);
+  benchState.selectedIds.clear();
+  for (const p of peers) {
+    if (filterFn(p)) benchState.selectedIds.add(p.id);
+  }
+  benchPopulateCheckboxes();
+  benchRender();
 }
 
 function benchRender() {
   if (!BENCH_KPIS || BENCH_KPIS.length === 0) return;
   const lang = document.body.dataset.lang || 'en';
   const mauriti = BENCH_KPIS.find(g => g.is_mauriti);
-  const peer = BENCH_KPIS.find(g => g.id === benchState.activeId);
-  if (!mauriti || !peer) return;
+  const neFleet = BENCH_KPIS.find(g => g.is_ne_fleet);
+  const selectedPeers = BENCH_KPIS.filter(
+    g => benchState.selectedIds.has(g.id));
 
   const I = (lang === 'pt')
     ? {cf:'CF curtailment',gen:'Geração',curt:'Cortado',plants:'usinas',
-       gwh:'GWh',pp:'pp',better:'PPA ↑',worse:'pior',betterAdj:'melhor'}
+       gwh:'GWh',pp:'pp',avg:'média',sel:'selecionados',noSel:'Nenhum peer selecionado',
+       groups:'grupos'}
     : {cf:'Curtailment CF',gen:'Generation',curt:'Curtailed',plants:'plants',
-       gwh:'GWh',pp:'pp',better:'better',worse:'worse',betterAdj:'better'};
+       gwh:'GWh',pp:'pp',avg:'avg',sel:'selected',noSel:'No peers selected',
+       groups:'groups'};
 
-  // Helper to build a key/val row
-  function row(key, val, unit, extraCls) {
-    extraCls = extraCls || '';
-    return `
-      <div class="bench-row ${extraCls}">
-        <span class="key">${key}</span>
-        <span class="val">${val}<span class="unit">${unit||''}</span></span>
-      </div>`;
+  // ===== NE Fleet swatch update =====
+  const neMeta = document.getElementById('bench-ne-meta');
+  if (neMeta && neFleet) {
+    neMeta.textContent = `${neFleet.n_plants} ${I.plants} · CF ${neFleet.cf.toFixed(2)}%`;
+  }
+  // Update color swatches for checkboxes
+  let pIdx = 0;
+  for (const p of BENCH_KPIS) {
+    if (p.is_mauriti || p.is_ne_fleet) continue;
+    const sw = document.querySelector(`[data-cb-swatch="${p.id}"]`);
+    if (sw) {
+      if (benchState.selectedIds.has(p.id)) {
+        const colour = colourFor(pIdx);
+        sw.style.background = colour;
+        sw.style.border = `1px solid ${colour}`;
+      } else {
+        sw.style.background = 'transparent';
+        sw.style.border = '1px solid var(--rule)';
+      }
+    }
+    if (benchState.selectedIds.has(p.id)) pIdx++;
   }
 
-  // Mauriti card
+  function row(key, val, unit, extraCls) {
+    extraCls = extraCls || '';
+    return `<div class="bench-row ${extraCls}"><span class="key">${key}</span>
+            <span class="val">${val}<span class="unit">${unit||''}</span></span></div>`;
+  }
+
+  // ===== Mauriti card =====
   document.getElementById('bench-mauriti-sub').textContent =
     `${mauriti.n_plants} ${I.plants}`;
   document.getElementById('bench-mauriti-rows').innerHTML =
@@ -4836,44 +5006,165 @@ function benchRender() {
     row(I.gen, _fmtGwh(mauriti.mwh_gen), ' ' + I.gwh) +
     row(I.curt, _fmtGwh(mauriti.mwh_curt), ' ' + I.gwh);
 
-  // Peer card
-  document.getElementById('bench-peer-label').textContent = peer.label.toUpperCase();
-  document.getElementById('bench-peer-sub').textContent =
-    `${peer.fonte} · ${peer.n_plants} ${I.plants}`;
-  document.getElementById('bench-peer-rows').innerHTML =
-    row(I.cf, _fmtPct(peer.cf), '%') +
-    row(I.gen, _fmtGwh(peer.mwh_gen), ' ' + I.gwh) +
-    row(I.curt, _fmtGwh(peer.mwh_curt), ' ' + I.gwh);
+  // ===== Peer aggregated card =====
+  const peerLabelEl = document.getElementById('bench-peer-label');
+  const peerSubEl = document.getElementById('bench-peer-sub');
+  const peerRowsEl = document.getElementById('bench-peer-rows');
+  const agg = aggregatePeers(selectedPeers);
+  if (agg && agg.n_groups > 0) {
+    if (agg.n_groups === 1) {
+      peerLabelEl.textContent = selectedPeers[0].label.toUpperCase();
+      peerSubEl.textContent = `${selectedPeers[0].fonte} · ${agg.n_plants} ${I.plants}`;
+    } else {
+      peerLabelEl.textContent = (lang === 'pt'
+        ? `${agg.n_groups} GRUPOS SELECIONADOS (MÉDIA PONDERADA)`
+        : `${agg.n_groups} SELECTED GROUPS (WEIGHTED AVG)`);
+      peerSubEl.textContent = `${agg.n_plants} ${I.plants} · ${agg.n_groups} ${I.groups}`;
+    }
+    peerRowsEl.innerHTML =
+      row(I.cf, _fmtPct(agg.cf), '%') +
+      row(I.gen, _fmtGwh(agg.mwh_gen), ' ' + I.gwh) +
+      row(I.curt, _fmtGwh(agg.mwh_curt), ' ' + I.gwh);
 
-  // Diff card (Mauriti - Peer)
-  // Para CF e curtailment, Mauriti MAIOR = pior; pra geracao, MAIOR = melhor.
-  const dCf = mauriti.cf - peer.cf;
-  const dGen = mauriti.mwh_gen - peer.mwh_gen;
-  const dCurt = mauriti.mwh_curt - peer.mwh_curt;
-  const cfCls = dCf > 0.5 ? 'diff-worse' : (dCf < -0.5 ? 'diff-better' : 'diff-neutral');
-  const curtCls = dCurt > 0 ? 'diff-worse' : (dCurt < 0 ? 'diff-better' : 'diff-neutral');
-  const genCls = 'diff-neutral';  // diff de geracao nao tem semantica (depende de escala)
-  document.getElementById('bench-diff-rows').innerHTML =
-    row(I.cf, (dCf >= 0 ? '+' : '') + _fmtPct(dCf), ' ' + I.pp, cfCls) +
-    row(I.gen, (dGen >= 0 ? '+' : '') + _fmtGwh(dGen), ' ' + I.gwh, genCls) +
-    row(I.curt, (dCurt >= 0 ? '+' : '') + _fmtGwh(dCurt), ' ' + I.gwh, curtCls);
+    // Diff card
+    const dCf = mauriti.cf - agg.cf;
+    const dGen = mauriti.mwh_gen - agg.mwh_gen;
+    const dCurt = mauriti.mwh_curt - agg.mwh_curt;
+    const cfCls = dCf > 0.5 ? 'diff-worse' : (dCf < -0.5 ? 'diff-better' : 'diff-neutral');
+    const curtCls = 'diff-neutral';  // diff de curt absoluto depende da escala dos grupos
+    document.getElementById('bench-diff-rows').innerHTML =
+      row(I.cf, (dCf >= 0 ? '+' : '') + _fmtPct(dCf), ' ' + I.pp, cfCls) +
+      row(I.gen, (dGen >= 0 ? '+' : '') + _fmtGwh(dGen), ' ' + I.gwh) +
+      row(I.curt, (dCurt >= 0 ? '+' : '') + _fmtGwh(dCurt), ' ' + I.gwh, curtCls);
+  } else {
+    peerLabelEl.textContent = I.noSel.toUpperCase();
+    peerSubEl.textContent = '';
+    peerRowsEl.innerHTML = '<div class="bench-row"><span class="key">—</span></div>';
+    document.getElementById('bench-diff-rows').innerHTML =
+      '<div class="bench-row"><span class="key">—</span></div>';
+  }
 
-  // Meta info acima
+  // ===== Meta info =====
   const meta = document.getElementById('bench-meta');
   if (meta) {
     meta.textContent = (lang === 'pt'
-      ? `${peer.fonte} · ${peer.n_plants} usinas`
-      : `${peer.fonte} · ${peer.n_plants} plants`);
+      ? `${selectedPeers.length} peer(s) selecionado(s) · ${agg ? agg.n_plants : 0} usinas no benchmark`
+      : `${selectedPeers.length} peer(s) selected · ${agg ? agg.n_plants : 0} plants in benchmark`);
   }
 
-  // Comparison chart: 3 metricas (CF%, Curt GWh, Gen GWh) lado a lado
-  benchRenderChart(mauriti, peer, lang);
+  // ===== Time series chart (monthly) =====
+  benchRenderMonthly(mauriti, selectedPeers, neFleet, lang);
 
-  // All groups table
+  // ===== Annual comparison bar chart =====
+  benchRenderCompare(mauriti, agg, selectedPeers, lang);
+
+  // ===== Reference table =====
   benchRenderTable(lang);
 }
 
-function benchRenderChart(mauriti, peer, lang) {
+function benchRenderMonthly(mauriti, selectedPeers, neFleet, lang) {
+  const el = document.getElementById('g_bench_monthly');
+  if (!el) return;
+  const traces = [];
+
+  // Trace 1: Mauriti (sempre presente, em destaque)
+  traces.push({
+    type: 'scatter', mode: 'lines+markers', name: '<b>Mauriti</b>',
+    x: mauriti.monthly.map(m => m.mes),
+    y: mauriti.monthly.map(m => m.cf),
+    line: {color: '#a8442f', width: 3.5},
+    marker: {size: 9, color: '#a8442f', line: {color: '#fafaf6', width: 2}},
+    hovertemplate: '<b>Mauriti</b><br>%{x}: %{y:.2f}%<extra></extra>',
+  });
+
+  // Trace 2: Selected peers (cada um com cor distinta)
+  selectedPeers.forEach((peer, idx) => {
+    if (!peer.monthly || peer.monthly.length === 0) return;
+    const c = colourFor(idx);
+    traces.push({
+      type: 'scatter', mode: 'lines+markers', name: peer.label,
+      x: peer.monthly.map(m => m.mes),
+      y: peer.monthly.map(m => m.cf),
+      line: {color: c, width: 1.6, dash: 'solid'},
+      marker: {size: 6, color: c, line: {color: '#fafaf6', width: 1}},
+      hovertemplate: `<b>${peer.label}</b><br>%{x}: %{y:.2f}%<extra></extra>`,
+      opacity: 0.85,
+    });
+  });
+
+  // Trace 3: Average of selected peers (curva agregada)
+  if (selectedPeers.length >= 2) {
+    const aggMonthly = aggregateMonthly(selectedPeers);
+    if (aggMonthly.length > 0) {
+      traces.push({
+        type: 'scatter', mode: 'lines+markers',
+        name: (lang === 'pt'
+          ? `<b>Média dos ${selectedPeers.length} selecionados</b>`
+          : `<b>Avg of ${selectedPeers.length} selected</b>`),
+        x: aggMonthly.map(m => m.mes),
+        y: aggMonthly.map(m => m.cf),
+        line: {color: '#1a1715', width: 2.5, dash: 'dash'},
+        marker: {size: 8, color: '#1a1715',
+                  line: {color: '#fafaf6', width: 1.5}, symbol: 'diamond'},
+        hovertemplate: (lang === 'pt'
+          ? '<b>Média selecionados</b><br>%{x}: %{y:.2f}%<extra></extra>'
+          : '<b>Selected avg</b><br>%{x}: %{y:.2f}%<extra></extra>'),
+      });
+    }
+  }
+
+  // Trace 4: NE Solar Fleet (referencia se toggled)
+  if (benchState.showNeFleet && neFleet && neFleet.monthly &&
+      neFleet.monthly.length > 0) {
+    traces.push({
+      type: 'scatter', mode: 'lines+markers',
+      name: (lang === 'pt'
+        ? `<b>Frota NE solar</b> (${neFleet.n_plants} UFVs)`
+        : `<b>NE solar fleet</b> (${neFleet.n_plants} UFVs)`),
+      x: neFleet.monthly.map(m => m.mes),
+      y: neFleet.monthly.map(m => m.cf),
+      line: {color: '#d92e0f', width: 2.5, dash: 'dot'},
+      marker: {size: 7, color: '#d92e0f',
+                line: {color: '#fafaf6', width: 1.5}, symbol: 'square'},
+      hovertemplate: (lang === 'pt'
+        ? `<b>Frota NE</b> (${neFleet.n_plants} UFVs)<br>%{x}: %{y:.2f}%<extra></extra>`
+        : `<b>NE fleet</b> (${neFleet.n_plants} UFVs)<br>%{x}: %{y:.2f}%<extra></extra>`),
+      opacity: 0.9,
+    });
+  }
+
+  const layout = {
+    title: {
+      text: (lang === 'pt'
+        ? 'Curtailment factor mensal — Mauriti vs peers selecionados'
+        : 'Monthly curtailment factor — Mauriti vs selected peers'),
+      font: {family: 'Fraunces, serif', size: 18, color: '#1a1a1a'},
+      x: 0.02, xanchor: 'left', y: 0.96
+    },
+    xaxis: {
+      title: '', gridcolor: '#e8e2d4',
+      tickfont: {family: 'IBM Plex Mono', size: 10}
+    },
+    yaxis: {
+      title: {text: 'CF (%)', font: {family: 'IBM Plex Mono', size: 11}},
+      gridcolor: '#e8e2d4', ticksuffix: '%',
+      tickfont: {family: 'IBM Plex Mono', size: 10}
+    },
+    margin: {l: 70, r: 30, t: 60, b: 100},
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    hovermode: 'x unified',
+    legend: {orientation: 'h', x: 0.5, y: -0.18, xanchor: 'center',
+             font: {family: 'IBM Plex Mono', size: 10}},
+    height: 480,
+  };
+  Plotly.react(el, traces, layout, {
+    responsive: true, displaylogo: false,
+    modeBarButtonsToRemove: ['lasso2d','select2d','autoScale2d','zoomIn2d','zoomOut2d']
+  });
+}
+
+function benchRenderCompare(mauriti, agg, selectedPeers, lang) {
   const el = document.getElementById('g_bench_compare');
   if (!el) return;
   const labels = (lang === 'pt')
@@ -4881,10 +5172,9 @@ function benchRenderChart(mauriti, peer, lang) {
     : ['Curtailment CF (%)', 'Generation (GWh)', 'Curtailed (GWh)'];
 
   const trace1 = {
-    type: 'bar', name: 'Mauriti',
-    x: labels,
+    type: 'bar', name: 'Mauriti', x: labels,
     y: [mauriti.cf, mauriti.mwh_gen/1000, mauriti.mwh_curt/1000],
-    marker: { color: '#a8442f' },
+    marker: {color: '#a8442f'},
     text: [_fmtPct(mauriti.cf) + '%',
            _fmtGwh(mauriti.mwh_gen) + ' GWh',
            _fmtGwh(mauriti.mwh_curt) + ' GWh'],
@@ -4892,42 +5182,48 @@ function benchRenderChart(mauriti, peer, lang) {
     textfont: {family: 'IBM Plex Mono', size: 11},
     hovertemplate: '<b>Mauriti</b><br>%{x}: %{y:.2f}<extra></extra>',
   };
-  const trace2 = {
-    type: 'bar', name: peer.label,
-    x: labels,
-    y: [peer.cf, peer.mwh_gen/1000, peer.mwh_curt/1000],
-    marker: { color: '#5b6b7d' },
-    text: [_fmtPct(peer.cf) + '%',
-           _fmtGwh(peer.mwh_gen) + ' GWh',
-           _fmtGwh(peer.mwh_curt) + ' GWh'],
-    textposition: 'outside',
-    textfont: {family: 'IBM Plex Mono', size: 11},
-    hovertemplate: `<b>${peer.label}</b><br>%{x}: %{y:.2f}<extra></extra>`,
-  };
+  const traces = [trace1];
+  if (agg) {
+    const peerName = selectedPeers.length === 1
+      ? selectedPeers[0].label
+      : (lang === 'pt'
+          ? `Média ${selectedPeers.length} selecionados`
+          : `Avg of ${selectedPeers.length} selected`);
+    const trace2 = {
+      type: 'bar', name: peerName, x: labels,
+      y: [agg.cf, agg.mwh_gen/1000, agg.mwh_curt/1000],
+      marker: {color: '#5b6b7d'},
+      text: [_fmtPct(agg.cf) + '%',
+             _fmtGwh(agg.mwh_gen) + ' GWh',
+             _fmtGwh(agg.mwh_curt) + ' GWh'],
+      textposition: 'outside',
+      textfont: {family: 'IBM Plex Mono', size: 11},
+      hovertemplate: `<b>${peerName}</b><br>%{x}: %{y:.2f}<extra></extra>`,
+    };
+    traces.push(trace2);
+  }
   const layout = {
     title: {
       text: (lang === 'pt'
-        ? `Comparação direta — Mauriti vs ${peer.label}`
-        : `Direct comparison — Mauriti vs ${peer.label}`),
-      font: {family: 'Fraunces, serif', size: 18, color: '#1a1a1a'},
+        ? 'Totais do período — comparação direta'
+        : 'Period totals — direct comparison'),
+      font: {family: 'Fraunces, serif', size: 16, color: '#1a1a1a'},
       x: 0.02, xanchor: 'left', y: 0.95
     },
-    barmode: 'group',
-    bargap: 0.3, bargroupgap: 0.15,
+    barmode: 'group', bargap: 0.3, bargroupgap: 0.15,
     xaxis: {tickfont: {family: 'IBM Plex Sans', size: 12}},
     yaxis: {title: '', gridcolor: '#e8e2d4',
             tickfont: {family: 'IBM Plex Mono', size: 10}},
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
-    margin: {l: 60, r: 30, t: 60, b: 60},
-    legend: {orientation: 'h', x: 0.5, y: -0.15, xanchor: 'center',
+    margin: {l: 60, r: 30, t: 50, b: 80},
+    legend: {orientation: 'h', x: 0.5, y: -0.18, xanchor: 'center',
              font: {family: 'IBM Plex Mono', size: 11}},
     height: 380,
   };
-  Plotly.react(el, [trace1, trace2], layout, {
+  Plotly.react(el, traces, layout, {
     responsive: true, displaylogo: false,
-    modeBarButtonsToRemove: ['lasso2d','select2d','autoScale2d',
-                              'zoomIn2d','zoomOut2d']
+    modeBarButtonsToRemove: ['lasso2d','select2d','autoScale2d','zoomIn2d','zoomOut2d']
   });
 }
 
@@ -4937,30 +5233,39 @@ function benchRenderTable(lang) {
   const rows = BENCH_KPIS.slice().sort((a, b) => {
     if (a.is_mauriti) return -1;
     if (b.is_mauriti) return 1;
+    if (a.is_ne_fleet) return -1;
+    if (b.is_ne_fleet) return 1;
     return b.cf - a.cf;  // peers ordenados por CF descendente
   });
   tbody.innerHTML = rows.map(g => {
-    const cls = (g.is_mauriti ? 'is-mauriti' : '') +
-                (g.id === benchState.activeId ? ' active-bench' : '');
+    const isPeer = !g.is_mauriti && !g.is_ne_fleet;
+    let cls = '';
+    if (g.is_mauriti) cls = 'is-mauriti';
+    else if (g.is_ne_fleet) cls = 'is-ne-fleet';
+    else if (benchState.selectedIds.has(g.id)) cls = 'active-bench';
     return `
       <tr class="${cls}" data-bench-id="${g.id}"
-          ${g.is_mauriti ? '' : 'role="button"'}>
+          ${isPeer ? 'role="button"' : ''}>
+        <td></td>
         <td>${g.label}</td>
         <td>${g.fonte}</td>
         <td class="num">${g.n_plants}</td>
         <td class="num">${_fmtGwh(g.mwh_gen)}</td>
         <td class="num">${_fmtGwh(g.mwh_curt)}</td>
         <td class="num">${_fmtPct(g.cf)}</td>
-      </tr>
-    `;
+      </tr>`;
   }).join('');
-  // Attach click handler to each peer row
+  // Click on peer rows toggles selection
   tbody.querySelectorAll('tr[data-bench-id]').forEach(tr => {
-    if (tr.classList.contains('is-mauriti')) return;
+    if (tr.classList.contains('is-mauriti') ||
+        tr.classList.contains('is-ne-fleet')) return;
     tr.addEventListener('click', () => {
-      benchState.activeId = tr.dataset.benchId;
-      const sel = document.getElementById('bench-group');
-      if (sel) sel.value = benchState.activeId;
+      const id = tr.dataset.benchId;
+      if (benchState.selectedIds.has(id)) benchState.selectedIds.delete(id);
+      else benchState.selectedIds.add(id);
+      // Re-build checkboxes to keep them in sync
+      const cb = document.querySelector(`input.bench-peer-cb[value="${id}"]`);
+      if (cb) cb.checked = benchState.selectedIds.has(id);
       benchRender();
     });
   });
@@ -4971,11 +5276,23 @@ function benchInit() {
     console.warn('Benchmark: no data available');
     return;
   }
-  benchPopulateDropdown();
-  const sel = document.getElementById('bench-group');
-  if (sel) {
-    sel.addEventListener('change', () => {
-      benchState.activeId = sel.value;
+  benchPopulateCheckboxes();
+
+  // Select all / none / UFV-only buttons
+  document.getElementById('bench-select-all').addEventListener('click', () => {
+    _benchSetSelection(p => true);
+  });
+  document.getElementById('bench-select-none').addEventListener('click', () => {
+    _benchSetSelection(p => false);
+  });
+  document.getElementById('bench-select-ufv').addEventListener('click', () => {
+    _benchSetSelection(p => p.fonte === 'UFV');
+  });
+  // NE fleet toggle
+  const neToggle = document.getElementById('bench-show-ne-fleet');
+  if (neToggle) {
+    neToggle.addEventListener('change', () => {
+      benchState.showNeFleet = neToggle.checked;
       benchRender();
     });
   }
@@ -5007,7 +5324,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                                                              "curtailment_factor": 0}
 
     # ========== KPIS POR GRUPO PARA BENCHMARK BUILDER ==========
-    # Calcula CF, MWh gen, MWh curt para cada grupo individual + Mauriti.
+    # Calcula CF, MWh gen, MWh curt para cada grupo individual + Mauriti +
+    # frota NE solar (universo). Inclui SERIE MENSAL pra graficos temporais.
     # Estrutura sera exportada como JSON pro JS interativo da aba Benchmark.
     def _slug(s: str) -> str:
         return (str(s).lower().strip().replace(" ", "_")
@@ -5015,6 +5333,38 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                 .replace("ç", "c").replace("ã", "a").replace("á", "a")
                 .replace("é", "e").replace("í", "i").replace("ó", "o")
                 .replace("ú", "u").replace("ô", "o").replace("â", "a"))
+
+    def _serie_mensal(df_in):
+        """Agrega geracao/curt/cf por mes (YYYY-MM). Retorna lista de dicts."""
+        if df_in is None or df_in.empty:
+            return []
+        d = df_in.copy()
+        d["mes"] = d["din_instante"].dt.to_period("M").astype(str)
+        m = (d.groupby("mes")
+              .agg(mwh_gen=("estimada_mwh", "sum"),
+                   mwh_curt=("curtailment_mwh", "sum"))
+              .reset_index())
+        m["cf"] = (100 * m["mwh_curt"]
+                    / m["mwh_gen"].replace(0, np.nan)).fillna(0)
+        return [{"mes": r["mes"], "mwh_gen": float(r["mwh_gen"]),
+                 "mwh_curt": float(r["mwh_curt"]), "cf": float(r["cf"])}
+                for _, r in m.iterrows()]
+
+    def _serie_mensal_ne(ne_df):
+        """Agrega geracao/curt/cf por mes para a frota NE solar."""
+        if ne_df is None or ne_df.empty or "mwh_estim_ne" not in ne_df.columns:
+            return []
+        d = ne_df.copy()
+        d["mes"] = d["hora"].dt.to_period("M").astype(str)
+        m = (d.groupby("mes")
+              .agg(mwh_gen=("mwh_estim_ne", "sum"),
+                   mwh_curt=("mwh_curt_ne", "sum"))
+              .reset_index())
+        m["cf"] = (100 * m["mwh_curt"]
+                    / m["mwh_gen"].replace(0, np.nan)).fillna(0)
+        return [{"mes": r["mes"], "mwh_gen": float(r["mwh_gen"]),
+                 "mwh_curt": float(r["mwh_curt"]), "cf": float(r["cf"])}
+                for _, r in m.iterrows()]
 
     bench_kpis_data = []
     # Mauriti como entrada destacada
@@ -5028,6 +5378,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         "mwh_curt": float(met_m.get("total_curt_mwh", 0)),
         "cf": float(met_m.get("curtailment_factor", 0)),
         "receita_perdida": float(met_m.get("receita_perdida", 0)),
+        "monthly": _serie_mensal(mauriti.df),
     })
     # Cada grupo do benchmark
     for g in grupos:
@@ -5042,9 +5393,35 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
             "mwh_curt": float(met_g.get("total_curt_mwh", 0)),
             "cf": float(met_g.get("curtailment_factor", 0)),
             "receita_perdida": float(met_g.get("receita_perdida", 0)),
+            "monthly": _serie_mensal(g.df),
         })
+
+    # Frota NE solar (universo) — referencia sempre disponivel
+    ne_monthly = _serie_mensal_ne(ne_horario)
+    ne_n_plants = (int(ne_horario["n_usinas"].max())
+                    if not ne_horario.empty and "n_usinas" in ne_horario.columns
+                    else 0)
+    ne_total_gen = sum(m["mwh_gen"] for m in ne_monthly)
+    ne_total_curt = sum(m["mwh_curt"] for m in ne_monthly)
+    ne_total_cf = (100 * ne_total_curt / ne_total_gen) if ne_total_gen > 0 else 0
+    ne_fleet = {
+        "id": "ne_solar_fleet",
+        "label": "NE solar fleet",
+        "is_mauriti": False,
+        "is_ne_fleet": True,  # flag especial pra UI
+        "fonte": "UFV",
+        "n_plants": ne_n_plants,
+        "mwh_gen": ne_total_gen,
+        "mwh_curt": ne_total_curt,
+        "cf": ne_total_cf,
+        "receita_perdida": 0,
+        "monthly": ne_monthly,
+    }
     print(f"  Benchmark KPIs: {len(bench_kpis_data)} grupos "
-          f"(incluindo Mauriti)")
+          f"(incluindo Mauriti) + NE solar fleet ({ne_n_plants} UFVs)")
+    # NE fleet vai pro final da lista (UI sabe tratar diferente via flag)
+    bench_kpis_data.append(ne_fleet)
+
 
     fig_tracker, daily_t, ref_cf, days_in_month = g_tracker(mauriti.df, today)
     done = daily_t.dropna(subset=["estim"])
