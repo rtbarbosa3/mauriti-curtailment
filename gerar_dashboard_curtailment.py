@@ -3561,7 +3561,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
               <select id="fc-c1-sub" class="forecast-select">
                 <option value="N">N</option>
                 <option value="NE">NE</option>
-                <option value="SE">SE</option>
+                <option value="SECO">SE/CO</option>
                 <option value="S" selected>S</option>
               </select>
             </div>
@@ -3596,7 +3596,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
               <select id="fc-c2-sub" class="forecast-select">
                 <option value="N">N</option>
                 <option value="NE">NE</option>
-                <option value="SE">SE</option>
+                <option value="SECO">SE/CO</option>
                 <option value="S" selected>S</option>
               </select>
             </div>
@@ -5899,16 +5899,23 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         # PLD MTD por submercado (filtra PLD raw pelo mes corrente)
         pld_mtd_por_sub = {}
         if not pld.empty:
-            pld_mes = pld[(pld["din_instante"] >= pd.Timestamp(cur_first)) &
-                            (pld["din_instante"] < pd.Timestamp(today + timedelta(days=1)))].copy()
+            pld_mes = pld[(pld["hora"] >= pd.Timestamp(cur_first)) &
+                            (pld["hora"] < pd.Timestamp(today + timedelta(days=1)))].copy()
             if not pld_mes.empty and "sub" in pld_mes.columns:
-                norm = {"NORDESTE": "NE", "NORTE": "N",
-                          "SUDESTE": "SE", "SUL": "S"}
-                pld_mes["sub_code"] = (pld_mes["sub"].astype(str)
-                                          .str.upper().str.strip()
-                                          .map(lambda x: norm.get(x, x)))
+                # Normalizacao consistente com selecionar_grupos
+                sub_map = {
+                    "NORDESTE": "NE", "NE": "NE",
+                    "SUDESTE/CENTROOESTE": "SECO", "SUDESTE": "SECO",
+                    "SECO": "SECO", "SE/CO": "SECO", "SE": "SECO",
+                    "SUL": "S", "S": "S",
+                    "NORTE": "N", "N": "N",
+                }
+                pld_mes["sub_norm"] = (pld_mes["sub"].astype(str)
+                                            .str.upper().str.strip())
+                pld_mes["sub_code"] = (pld_mes["sub_norm"].map(sub_map)
+                                            .fillna(pld_mes["sub_norm"]))
                 for sub_code, grp in pld_mes.groupby("sub_code"):
-                    pld_mtd_por_sub[sub_code] = round(
+                    pld_mtd_por_sub[str(sub_code)] = round(
                         float(grp["pld"].mean()), 2)
         # Fallback se PLD nao tiver: usar PLD do mod_mensal_data do mes
         if not pld_mtd_por_sub and mod_mensal_data:
