@@ -2776,101 +2776,243 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .mod-table td.delta{font-variant-numeric:tabular-nums}
 
 /* ============================== */
-/* PPA What-If Simulator (v5.4)   */
+/* MONTHLY FORECAST (v5.6)        */
 /* ============================== */
-.ppa-simulator{margin:24px 0 16px;padding:28px 32px;
-  background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
-.ppa-type-toggle{display:inline-flex;margin-bottom:24px;
-  border:1px solid var(--rule);border-radius:2px;overflow:hidden}
-.ppa-type-btn{background:var(--panel);border:none;
-  border-right:1px solid var(--rule);cursor:pointer;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;
-  letter-spacing:0.1em;text-transform:uppercase;font-weight:500;
-  padding:10px 18px;color:var(--muted);transition:all 0.15s}
-.ppa-type-btn:last-child{border-right:none}
-.ppa-type-btn:hover{color:var(--ink-2)}
-.ppa-type-btn.active{background:var(--ink);color:var(--bg);font-weight:600}
-.ppa-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;
-  margin-bottom:24px;align-items:start}
-@media(max-width:780px){.ppa-inputs{grid-template-columns:1fr}}
-.ppa-input-group label{display:block;font-family:'IBM Plex Mono',monospace;
-  font-size:10px;color:var(--muted);text-transform:uppercase;
-  letter-spacing:0.15em;margin-bottom:8px;font-weight:500}
-.ppa-input-row{display:flex;gap:12px;align-items:center}
-.ppa-input-row input[type="range"]{flex:1;-webkit-appearance:none;height:4px;
-  background:var(--rule);border-radius:2px;outline:none;cursor:pointer}
-.ppa-input-row input[type="range"]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:18px;height:18px;background:var(--accent);
-  border-radius:50%;cursor:pointer;border:2px solid var(--panel);
-  box-shadow:0 1px 3px rgba(0,0,0,0.15)}
-.ppa-input-row input[type="range"]::-moz-range-thumb{
-  width:18px;height:18px;background:var(--accent);border-radius:50%;
+.forecast-empty{padding:48px;text-align:center;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;font-size:13px}
+.forecast-wrap{display:flex;flex-direction:column;gap:24px;margin:24px 0 16px}
+
+/* === Section 1: Projection === */
+.forecast-projection{padding:24px 28px;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-projection-head{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--rule);
+  flex-wrap:wrap;gap:8px}
+.forecast-projection-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:17px;margin:0;color:var(--ink)}
+.forecast-proj-sub{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--muted);letter-spacing:0.06em}
+.forecast-proj-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
+@media(max-width:768px){.forecast-proj-grid{grid-template-columns:repeat(2,1fr)}}
+.forecast-proj-cell{display:flex;flex-direction:column;gap:6px;padding:8px 0}
+.forecast-proj-cell .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.12em;text-transform:uppercase}
+.forecast-proj-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:24px;line-height:1;letter-spacing:-0.01em;color:var(--ink)}
+.forecast-proj-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;
+  font-size:11px;color:var(--muted);font-weight:400;margin-left:4px}
+.forecast-proj-cell.forecast-proj-total{padding-left:18px;border-left:3px solid var(--accent)}
+.forecast-proj-cell.forecast-proj-total .val{font-size:28px;color:var(--accent)}
+.forecast-proj-meta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);margin-top:2px;letter-spacing:0.04em}
+
+/* === Section 2: Contract setup === */
+.forecast-contracts{padding:24px 28px;background:var(--panel);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-contracts-head{display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--rule)}
+.forecast-contracts-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:17px;margin:0;color:var(--ink)}
+.forecast-btn-mini{padding:6px 14px;border:1px solid var(--accent);background:var(--panel);
+  font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.1em;
+  color:var(--accent);cursor:pointer;border-radius:2px;text-transform:uppercase;
+  transition:all 0.15s;font-weight:500}
+.forecast-btn-mini:hover{background:var(--accent);color:var(--panel)}
+.forecast-btn-mini:disabled{opacity:0.4;cursor:not-allowed}
+.forecast-btn-mini:disabled:hover{background:var(--panel);color:var(--accent)}
+.forecast-contract{padding:16px 0;border-bottom:1px dashed var(--rule)}
+.forecast-contract:last-of-type{border-bottom:none}
+.forecast-contract-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.forecast-contract-tag{display:inline-block;padding:3px 9px;background:var(--ink);
+  color:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:10px;
+  font-weight:600;letter-spacing:0.1em;border-radius:2px}
+.forecast-contract-label{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--ink);letter-spacing:0.06em;font-weight:500}
+.forecast-btn-remove{margin-left:auto;padding:4px 10px;border:1px solid var(--rule);
+  background:transparent;font-family:'IBM Plex Mono',monospace;font-size:9px;
+  letter-spacing:0.1em;color:var(--muted);cursor:pointer;border-radius:2px;
+  text-transform:uppercase}
+.forecast-btn-remove:hover{color:var(--accent-today);border-color:var(--accent-today)}
+.forecast-contract-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px;
+  align-items:start}
+@media(max-width:768px){.forecast-contract-grid{grid-template-columns:1fr}}
+.forecast-input-group label{display:block;font-family:'IBM Plex Mono',monospace;
+  font-size:10px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;margin-bottom:6px}
+.forecast-input-row{display:flex;gap:10px;align-items:center}
+.forecast-input-row input[type="range"]{flex:1;-webkit-appearance:none;
+  height:4px;background:var(--rule);outline:none;border-radius:2px}
+.forecast-input-row input[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:16px;height:16px;background:var(--accent);
+  border-radius:50%;cursor:pointer;border:2px solid var(--panel)}
+.forecast-input-row input[type="range"]::-moz-range-thumb{
+  width:16px;height:16px;background:var(--accent);border-radius:50%;
   cursor:pointer;border:2px solid var(--panel)}
-.ppa-input-row input[type="number"]{width:90px;padding:8px 10px;
-  border:1px solid var(--rule);border-radius:2px;
-  font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
-  text-align:right;background:var(--panel);color:var(--ink)}
-.ppa-select{width:100%;padding:9px 12px;border:1px solid var(--rule);
-  border-radius:2px;font-family:'IBM Plex Sans',sans-serif;font-size:13px;
-  background:var(--panel);color:var(--ink);cursor:pointer}
-.ppa-hint{font-family:'IBM Plex Mono',monospace;font-size:10px;
-  color:var(--muted);margin-top:6px;letter-spacing:0.05em}
-.ppa-add-second{margin:18px 0 0;padding:0;display:flex;align-items:center;gap:14px;
+.forecast-input-row input[type="number"]{width:96px;padding:7px 10px;
+  border:1px solid var(--rule);background:var(--panel);
+  font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink);
+  border-radius:2px;text-align:right}
+.forecast-input-row input[type="number"]:focus{outline:none;border-color:var(--accent)}
+.forecast-select{width:100%;padding:8px 10px;border:1px solid var(--rule);
+  background:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:12px;
+  color:var(--ink);border-radius:2px;cursor:pointer}
+.forecast-select:focus{outline:none;border-color:var(--accent)}
+.forecast-hint{font-family:'IBM Plex Mono',monospace;font-size:9px;
+  color:var(--muted);letter-spacing:0.04em;margin-top:4px;font-style:italic}
+.forecast-portfolio-summary{margin-top:16px;padding:12px 16px;
+  background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink);
+  letter-spacing:0.04em;display:flex;justify-content:space-between;flex-wrap:wrap;
+  gap:8px}
+.forecast-portfolio-summary strong{font-weight:600;color:var(--accent)}
+
+/* === Section 3: PLD reference === */
+.forecast-pld-ref{padding:20px 24px;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-pld-head{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;
   flex-wrap:wrap}
-.ppa-add-btn{background:transparent;border:1px dashed var(--rule);color:var(--accent);
-  cursor:pointer;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.12em;
-  text-transform:uppercase;font-weight:500;padding:8px 16px;border-radius:2px;
-  transition:all 0.15s}
-.ppa-add-btn:hover{background:var(--bg-alt);border-color:var(--accent);
-  border-style:solid}
-.ppa-add-btn.hidden{display:none}
-.ppa-add-hint{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
-  color:var(--muted);font-style:italic}
-.ppa-second-row{margin:20px 0 0;padding:20px 22px;background:var(--bg);
-  border:1px solid var(--rule);border-radius:2px;position:relative}
-.ppa-second-head{display:flex;align-items:center;justify-content:space-between;
-  margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--rule)}
-.ppa-tag-secondary{display:inline-block;padding:4px 10px;background:var(--accent-today);
-  color:var(--bg);font-family:'IBM Plex Mono',monospace;font-size:10px;
-  letter-spacing:0.18em;text-transform:uppercase;font-weight:600;border-radius:2px}
-.ppa-remove-btn{background:transparent;border:none;color:var(--muted);
-  cursor:pointer;font-size:22px;line-height:1;padding:4px 10px;border-radius:2px;
-  transition:all 0.15s;font-family:'IBM Plex Sans',sans-serif}
-.ppa-remove-btn:hover{background:var(--bg-alt);color:var(--accent-today)}
-.ppa-results{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;
-  margin:24px 0;padding:24px 0;
-  border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
-@media(max-width:780px){.ppa-results{grid-template-columns:1fr}}
-.ppa-kpi .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
-  color:var(--muted);text-transform:uppercase;letter-spacing:0.15em;
-  margin-bottom:8px;font-weight:500}
-.ppa-kpi .val{font-family:'Fraunces',Georgia,serif;font-weight:400;
-  font-size:28px;line-height:1;letter-spacing:-0.02em;color:var(--ink)}
-.ppa-kpi.alt .val{color:var(--accent)}
-.ppa-kpi .delta{font-family:'IBM Plex Mono',monospace;font-size:12px;
-  margin-top:8px;font-weight:600;letter-spacing:0.04em}
-.ppa-kpi .delta.good{color:#2d5a3d}
-.ppa-kpi .delta.bad{color:var(--accent-today)}
-.ppa-kpi .hint{font-family:'IBM Plex Sans',sans-serif;font-size:11px;
-  color:var(--muted);margin-top:6px;font-style:italic}
-.ppa-monthly-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:17px;margin:0 0 14px;color:var(--ink)}
-.ppa-table tr.win td{background:rgba(45,90,61,0.07)}
-.ppa-table tr.win td.delta{color:#2d5a3d;font-weight:600}
-.ppa-table tr.lose td{background:rgba(217,46,15,0.06)}
-.ppa-table tr.lose td.delta{color:var(--accent-today);font-weight:600}
-.ppa-disclaimer{margin:24px 0 0;padding:14px 18px;background:transparent;
-  border:1px dashed var(--rule);font-family:'IBM Plex Sans',sans-serif;
-  font-size:11px;line-height:1.55;color:var(--muted);font-style:italic}
-#ppa-volume-group.hidden{opacity:0.4;pointer-events:none}
-.ppa-sensitivity-wrap{margin:32px 0 0;padding:24px 0 0;
-  border-top:1px solid var(--rule)}
-.ppa-sensitivity-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:17px;margin:0 0 8px;color:var(--ink)}
-.ppa-sens-desc{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
-  line-height:1.55;color:var(--muted);margin:0 0 14px;max-width:780px}
-.ppa-sens-hint{font-family:'IBM Plex Mono',monospace;font-size:10px;
-  color:var(--muted);margin:8px 0 0;letter-spacing:0.05em;text-align:center}
+.forecast-pld-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:15px;margin:0;color:var(--ink)}
+.forecast-pld-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.04em;font-style:italic}
+.forecast-pld-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
+  gap:10px;margin-bottom:14px}
+.forecast-pld-cell{padding:10px 12px;background:var(--panel);border:1px solid var(--rule);
+  border-radius:2px;text-align:center}
+.forecast-pld-cell .sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px}
+.forecast-pld-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:18px;color:var(--ink);line-height:1}
+.forecast-pld-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;
+  font-size:9px;color:var(--muted);font-weight:400;margin-left:2px}
+.forecast-pld-meta{padding:10px 0 0;border-top:1px dashed var(--rule);
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink);
+  letter-spacing:0.04em}
+.forecast-pld-meta strong{color:var(--accent);font-weight:600}
+.forecast-pld-extra{color:var(--muted);font-size:10px;margin-left:6px;
+  font-style:italic}
+
+/* === Section 4: 3 result cards === */
+.forecast-cards-row{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media(max-width:900px){.forecast-cards-row{grid-template-columns:1fr}}
+.forecast-card{padding:22px 24px;background:var(--panel);border:1px solid var(--rule);
+  border-radius:2px;display:flex;flex-direction:column;gap:12px}
+.forecast-card-ccee{border-left:3px solid var(--neutral)}
+.forecast-card-comm{border-left:3px solid var(--accent)}
+.forecast-card-final{border-left:3px solid var(--ink);background:var(--bg-alt);
+  padding:26px 28px}
+.forecast-card-label{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  font-weight:600;letter-spacing:0.22em;text-transform:uppercase;color:var(--ink)}
+.forecast-card-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.04em;margin-top:-6px}
+.forecast-card-detail{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+.forecast-card-row{display:flex;justify-content:space-between;align-items:baseline;
+  font-family:'IBM Plex Mono',monospace;font-size:11px}
+.forecast-card-row .label{color:var(--muted);letter-spacing:0.04em}
+.forecast-card-row .value{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+.forecast-card-row.is-neg .value{color:var(--accent-today)}
+.forecast-card-row.is-pos .value{color:var(--ok)}
+.forecast-card-total{display:flex;justify-content:space-between;align-items:baseline;
+  padding-top:12px;border-top:1px solid var(--rule);margin-top:auto}
+.forecast-card-total .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--ink);letter-spacing:0.1em;text-transform:uppercase;font-weight:600}
+.forecast-card-total .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:22px;color:var(--ink);line-height:1}
+.forecast-card-final .forecast-final-figure{font-family:'Fraunces',Georgia,serif;
+  font-weight:500;font-size:42px;line-height:1;letter-spacing:-0.02em;
+  color:var(--ink);font-variation-settings:"opsz" 72;margin:8px 0}
+.forecast-card-final.is-pos .forecast-final-figure{color:var(--ok)}
+.forecast-card-final.is-neg .forecast-final-figure{color:var(--accent-today)}
+.forecast-final-meta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.04em;line-height:1.5}
+
+/* === Section 5: Alert === */
+.forecast-alert{display:flex;gap:14px;padding:16px 20px;
+  background:rgba(217,46,15,0.08);border:1px solid var(--accent-today);
+  border-radius:2px;align-items:flex-start}
+.forecast-alert-icon{font-size:20px;color:var(--accent-today);line-height:1}
+.forecast-alert-body strong{display:block;font-family:'IBM Plex Mono',monospace;
+  font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
+  color:var(--accent-today);margin-bottom:6px}
+.forecast-alert-body p{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+  color:var(--ink);margin:0;line-height:1.5}
+
+/* === Section 6: Sensitivity strip === */
+.forecast-sensitivity{padding:22px 24px;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-sensitivity h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:15px;margin:0 0 8px;color:var(--ink)}
+.forecast-sens-desc{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+  color:var(--muted);line-height:1.55;margin:0 0 16px;max-width:760px}
+.forecast-sens-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:768px){.forecast-sens-grid{grid-template-columns:1fr}}
+.forecast-sens-cell{padding:14px 16px;background:var(--panel);
+  border:1px solid var(--rule);border-radius:2px;text-align:center}
+.forecast-sens-cell.is-base{border-color:var(--accent);background:rgba(168,68,47,0.04)}
+.forecast-sens-cell .scenario{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px}
+.forecast-sens-cell.is-base .scenario{color:var(--accent);font-weight:600}
+.forecast-sens-cell .pld-future{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--muted);margin-bottom:6px}
+.forecast-sens-cell .pld-future strong{color:var(--ink)}
+.forecast-sens-cell .result{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:22px;color:var(--ink);line-height:1}
+.forecast-sens-cell .delta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.04em;margin-top:4px}
+.forecast-sens-cell .delta.is-up{color:var(--ok)}
+.forecast-sens-cell .delta.is-down{color:var(--accent-today)}
+
+/* === Section 7: Risk decomposition === */
+.forecast-decomp{padding:22px 24px;background:var(--panel);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-decomp h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:15px;margin:0 0 8px;color:var(--ink)}
+.forecast-decomp-desc{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+  color:var(--muted);line-height:1.55;margin:0 0 16px;max-width:760px}
+.forecast-decomp-grid{display:flex;flex-direction:column;gap:8px}
+.forecast-decomp-row{display:grid;grid-template-columns:200px 1fr 100px;
+  gap:14px;align-items:center;padding:10px 14px;background:var(--bg-alt);
+  border-radius:2px;font-family:'IBM Plex Mono',monospace;font-size:11px}
+@media(max-width:768px){.forecast-decomp-row{grid-template-columns:1fr}}
+.forecast-decomp-row .label{color:var(--ink);letter-spacing:0.04em}
+.forecast-decomp-row .label small{display:block;color:var(--muted);font-size:9px;
+  font-style:italic;margin-top:2px}
+.forecast-decomp-row .bar-wrap{height:10px;background:var(--rule);border-radius:2px;
+  overflow:hidden;position:relative}
+.forecast-decomp-row .bar{height:100%;border-radius:2px}
+.forecast-decomp-row .bar.is-pos{background:var(--ok)}
+.forecast-decomp-row .bar.is-neg{background:var(--accent-today)}
+.forecast-decomp-row .value{text-align:right;font-weight:500;font-variant-numeric:tabular-nums}
+.forecast-decomp-row .value.is-pos{color:var(--ok)}
+.forecast-decomp-row .value.is-neg{color:var(--accent-today)}
+.forecast-decomp-row.is-total{background:var(--ink);color:var(--panel);font-weight:600;
+  margin-top:8px}
+.forecast-decomp-row.is-total .label,
+.forecast-decomp-row.is-total .value{color:var(--panel)}
+
+/* === Section 8: History tracking === */
+.forecast-history{padding:18px 22px;background:var(--bg-alt);
+  border:1px solid var(--rule);border-radius:2px}
+.forecast-history h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+  font-size:15px;margin:0 0 12px;color:var(--ink)}
+.forecast-hist-empty{font-family:'IBM Plex Mono',monospace;font-size:11px;
+  color:var(--muted);font-style:italic;letter-spacing:0.04em}
+.forecast-hist-row{display:flex;justify-content:space-between;align-items:baseline;
+  padding:8px 0;border-bottom:1px dotted var(--rule);
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink)}
+.forecast-hist-row:last-child{border-bottom:none;font-weight:600}
+.forecast-hist-row .label{color:var(--muted);letter-spacing:0.04em}
+.forecast-hist-row .val{font-variant-numeric:tabular-nums}
+.forecast-hist-row .delta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  margin-left:8px}
+.forecast-hist-row .delta.is-up{color:var(--ok)}
+.forecast-hist-row .delta.is-down{color:var(--accent-today)}
+
+.forecast-disclaimer{margin:8px 0 0;padding:14px 18px;background:transparent;
+  border-top:1px dashed var(--rule);font-family:'IBM Plex Sans',sans-serif;
+  font-size:11px;color:var(--muted);line-height:1.6;font-style:italic;max-width:780px}
+
 
 footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
   font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
@@ -3327,169 +3469,233 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <!-- ========================================================= -->
-    <!-- PPA What-If Simulator (interactive client-side simulation) -->
+    <!-- MONTHLY FORECAST (substitui o PPA What-If antigo)            -->
+    <!-- Foco: projecao financeira do mes corrente (CCEE + Comercial) -->
     <!-- ========================================================= -->
     <div class="section-head">
       <span class="num">IV.</span>
-      <h3 data-i18n="ppa_title">PPA what-if simulator</h3>
-      <span class="tag" data-i18n="ppa_tag">INTERACTIVE</span>
+      <h3 data-i18n="forecast_title">Monthly forecast</h3>
+      <span class="tag" data-i18n="forecast_tag">INTERACTIVE</span>
     </div>
-    <p class="section-desc" data-i18n="ppa_desc">
-      Simulates what Mauriti's revenue would have been under different PPA
-      structures: a fixed monthly volume delivered flat hour-by-hour at a
-      fixed price, optionally in a different submarket. Compares against
-      the real MCP modulated revenue across the period.
+    <p class="section-desc" data-i18n="forecast_desc">
+      Projects end-of-month financial outcome based on generation realized
+      so far + daily-average pace for remaining days. Set up your hedge
+      portfolio (up to 2 contracts) and see how CCEE settlement and commercial
+      revenue compose the bottom line.
     </p>
 
-    <div class="ppa-simulator">
-      <!-- Toggle PPA type -->
-      <div class="ppa-type-toggle">
-        <button class="ppa-type-btn active" data-type="A"
-                data-i18n="ppa_type_a">Volume limited (A)</button>
-        <button class="ppa-type-btn" data-type="B"
-                data-i18n="ppa_type_b">All-take (B)</button>
-      </div>
+    {% if forecast_data.vazio %}
+    <div class="forecast-empty">
+      <p data-i18n="forecast_empty">No data for the current month yet. Wait
+        until end-of-day to see projection.</p>
+    </div>
+    {% else %}
 
-      <!-- Inputs -->
-      <div class="ppa-inputs">
-        <!-- PPA Price -->
-        <div class="ppa-input-group">
-          <label data-i18n="ppa_price_label">PPA price (R$/MWh)</label>
-          <div class="ppa-input-row">
-            <input type="range" min="100" max="350" step="5" value="200" id="ppa-price">
-            <input type="number" min="50" max="500" step="1" value="200" id="ppa-price-num">
+    <div class="forecast-wrap" id="forecast-wrap">
+
+      <!-- ========== 1. Generation projection (auto) ========== -->
+      <div class="forecast-projection">
+        <div class="forecast-projection-head">
+          <h4 data-i18n="forecast_proj_title">Generation projection &mdash;
+            {{ forecast_data.cur_month_label }}</h4>
+          <span class="forecast-proj-sub">
+            <span id="forecast-days-info">
+              {{ forecast_data.days_elapsed }} of {{ forecast_data.days_total }}
+              days elapsed
+            </span>
+          </span>
+        </div>
+        <div class="forecast-proj-grid">
+          <div class="forecast-proj-cell">
+            <div class="key" data-i18n="forecast_realized">Realized MTD</div>
+            <div class="val"><span id="fp-realized">—</span><span class="unit"> MWh</span></div>
+          </div>
+          <div class="forecast-proj-cell">
+            <div class="key" data-i18n="forecast_daily">Daily avg</div>
+            <div class="val"><span id="fp-daily">—</span><span class="unit"> MWh/day</span></div>
+          </div>
+          <div class="forecast-proj-cell">
+            <div class="key" data-i18n="forecast_projected">Projected (remaining)</div>
+            <div class="val">+<span id="fp-projected">—</span><span class="unit"> MWh</span></div>
+          </div>
+          <div class="forecast-proj-cell forecast-proj-total">
+            <div class="key" data-i18n="forecast_total">Total forecast</div>
+            <div class="val val-strong"><span id="fp-total">—</span><span class="unit"> MWh</span></div>
+            <div class="forecast-proj-meta"><span id="fp-mwm">—</span> <span data-i18n="forecast_mwm">MW avg</span></div>
           </div>
         </div>
+      </div>
 
-        <!-- Volume -->
-        <div class="ppa-input-group" id="ppa-volume-group">
-          <label data-i18n="ppa_volume_label">Contracted volume (MWh/month, flat)</label>
-          <div class="ppa-input-row">
-            <input type="range" min="5000" max="50000" step="500" value="20000" id="ppa-volume">
-            <input type="number" min="0" max="200000" step="100" value="20000" id="ppa-volume-num">
+      <!-- ========== 2. Contract setup (sliders) ========== -->
+      <div class="forecast-contracts">
+        <div class="forecast-contracts-head">
+          <h4 data-i18n="forecast_contracts_title">Contract portfolio</h4>
+          <button class="forecast-btn-mini" id="forecast-add-c2" type="button"
+                  data-i18n="forecast_btn_add_c2">+ Add 2nd contract</button>
+        </div>
+
+        <!-- Contract 1 -->
+        <div class="forecast-contract" data-cid="1">
+          <div class="forecast-contract-head">
+            <span class="forecast-contract-tag">C1</span>
+            <span class="forecast-contract-label" data-i18n="forecast_contract_1">Contract 1</span>
           </div>
-          <div class="ppa-hint" id="ppa-volume-hint"></div>
-        </div>
-
-        <!-- Submercado -->
-        <div class="ppa-input-group">
-          <label data-i18n="ppa_sub_label">Delivery submarket</label>
-          <select id="ppa-submercado" class="ppa-select">
-            <option value="NE" data-i18n="ppa_sub_ne">NE — Nordeste (same as plant)</option>
-            <option value="SECO" selected data-i18n="ppa_sub_seco">SE/CO — Sudeste/Centro-Oeste</option>
-            <option value="S" data-i18n="ppa_sub_s">S — Sul</option>
-            <option value="N" data-i18n="ppa_sub_n">N — Norte</option>
-          </select>
-        </div>
-      </div>
-
-      <!-- Toggle: add second PPA -->
-      <div class="ppa-add-second" id="ppa-add-second-wrap">
-        <button class="ppa-add-btn" id="ppa-add-btn" type="button">
-          <span data-i18n="ppa_add_second">+ Add second PPA</span>
-        </button>
-        <span class="ppa-add-hint" data-i18n="ppa_add_hint">Combine two contracts in different submarkets</span>
-      </div>
-
-      <!-- Second PPA inputs (hidden by default) -->
-      <div class="ppa-second-row" id="ppa-second-row" style="display:none">
-        <div class="ppa-second-head">
-          <span class="ppa-tag-secondary" data-i18n="ppa_second_label">2nd PPA</span>
-          <button class="ppa-remove-btn" id="ppa-remove-btn" type="button"
-                  data-i18n-title="ppa_remove_second" title="Remove second PPA">×</button>
-        </div>
-        <div class="ppa-inputs">
-          <div class="ppa-input-group">
-            <label data-i18n="ppa_price_label">PPA price (R$/MWh)</label>
-            <div class="ppa-input-row">
-              <input type="range" min="100" max="350" step="5" value="220" id="ppa-price-2">
-              <input type="number" min="50" max="500" step="1" value="220" id="ppa-price-2-num">
+          <div class="forecast-contract-grid">
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_volume">Volume (MWh)</label>
+              <div class="forecast-input-row">
+                <input type="range" min="0" max="100000" step="100" value="37200" id="fc-c1-vol">
+                <input type="number" min="0" max="200000" step="100" value="37200" id="fc-c1-vol-num">
+              </div>
+              <div class="forecast-hint" id="fc-c1-vol-hint"></div>
+            </div>
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_price">Price (R$/MWh)</label>
+              <div class="forecast-input-row">
+                <input type="range" min="50" max="500" step="1" value="116" id="fc-c1-price">
+                <input type="number" min="0" max="2000" step="1" value="116" id="fc-c1-price-num">
+              </div>
+            </div>
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_submarket">Submarket</label>
+              <select id="fc-c1-sub" class="forecast-select">
+                <option value="N">N</option>
+                <option value="NE">NE</option>
+                <option value="SE">SE</option>
+                <option value="S" selected>S</option>
+              </select>
             </div>
           </div>
-          <div class="ppa-input-group">
-            <label data-i18n="ppa_volume_label">Contracted volume (MWh/month, flat)</label>
-            <div class="ppa-input-row">
-              <input type="range" min="0" max="50000" step="500" value="10000" id="ppa-volume-2">
-              <input type="number" min="0" max="200000" step="100" value="10000" id="ppa-volume-2-num">
+        </div>
+
+        <!-- Contract 2 (collapsed by default) -->
+        <div class="forecast-contract" data-cid="2" id="fc-c2-wrap" style="display:none">
+          <div class="forecast-contract-head">
+            <span class="forecast-contract-tag">C2</span>
+            <span class="forecast-contract-label" data-i18n="forecast_contract_2">Contract 2</span>
+            <button class="forecast-btn-remove" id="forecast-remove-c2" type="button" data-i18n="forecast_btn_remove">Remove</button>
+          </div>
+          <div class="forecast-contract-grid">
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_volume">Volume (MWh)</label>
+              <div class="forecast-input-row">
+                <input type="range" min="0" max="100000" step="100" value="0" id="fc-c2-vol">
+                <input type="number" min="0" max="200000" step="100" value="0" id="fc-c2-vol-num">
+              </div>
+              <div class="forecast-hint" id="fc-c2-vol-hint"></div>
             </div>
-            <div class="ppa-hint" id="ppa-volume-2-hint"></div>
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_price">Price (R$/MWh)</label>
+              <div class="forecast-input-row">
+                <input type="range" min="50" max="500" step="1" value="200" id="fc-c2-price">
+                <input type="number" min="0" max="2000" step="1" value="200" id="fc-c2-price-num">
+              </div>
+            </div>
+            <div class="forecast-input-group">
+              <label data-i18n="forecast_submarket">Submarket</label>
+              <select id="fc-c2-sub" class="forecast-select">
+                <option value="N">N</option>
+                <option value="NE">NE</option>
+                <option value="SE">SE</option>
+                <option value="S" selected>S</option>
+              </select>
+            </div>
           </div>
-          <div class="ppa-input-group">
-            <label data-i18n="ppa_sub_label">Delivery submarket</label>
-            <select id="ppa-submercado-2" class="ppa-select">
-              <option value="NE" data-i18n="ppa_sub_ne">NE — Nordeste (same as plant)</option>
-              <option value="SECO" data-i18n="ppa_sub_seco">SE/CO — Sudeste/Centro-Oeste</option>
-              <option value="S" selected data-i18n="ppa_sub_s">S — Sul</option>
-              <option value="N" data-i18n="ppa_sub_n">N — Norte</option>
-            </select>
+        </div>
+
+        <!-- Summary line: total contracted vs forecast -->
+        <div class="forecast-portfolio-summary" id="forecast-portfolio-summary"></div>
+      </div>
+
+      <!-- ========== 3. PLD reference (auto, MTD) ========== -->
+      <div class="forecast-pld-ref">
+        <div class="forecast-pld-head">
+          <h4 data-i18n="forecast_pld_title">PLD reference (MTD)</h4>
+          <span class="forecast-pld-sub" data-i18n="forecast_pld_sub">
+            Month-to-date hourly average per submarket</span>
+        </div>
+        <div class="forecast-pld-grid" id="forecast-pld-grid"></div>
+        <div class="forecast-pld-meta">
+          <span data-i18n="forecast_pld_eff">Mauriti effective price</span>:
+          <strong id="fp-pld-eff">—</strong>
+          <span class="forecast-pld-extra" data-i18n="forecast_pld_eff_sub">
+            (incorporates curtailment + modulation discount)</span>
+        </div>
+      </div>
+
+      <!-- ========== 4. CCEE View (detailed, auditable) ========== -->
+      <div class="forecast-cards-row">
+        <div class="forecast-card forecast-card-ccee">
+          <div class="forecast-card-label" data-i18n="forecast_ccee_title">CCEE VIEW</div>
+          <div class="forecast-card-sub" data-i18n="forecast_ccee_sub">Spot settlement at submarket PLD</div>
+          <div class="forecast-card-detail" id="forecast-ccee-detail"></div>
+          <div class="forecast-card-total">
+            <span class="key" data-i18n="forecast_ccee_net">Net CCEE</span>
+            <span class="val" id="forecast-ccee-net">—</span>
           </div>
         </div>
-      </div>
 
-      <!-- Results -->
-      <div class="ppa-results">
-        <div class="ppa-kpi">
-          <div class="lbl" data-i18n="ppa_kpi_mcp">Real MCP revenue (no PPA)</div>
-          <div class="val" id="ppa-real">—</div>
-          <div class="hint" data-i18n="ppa_kpi_mcp_hint">As observed in the period</div>
+        <div class="forecast-card forecast-card-comm">
+          <div class="forecast-card-label" data-i18n="forecast_comm_title">COMMERCIAL VIEW</div>
+          <div class="forecast-card-sub" data-i18n="forecast_comm_sub">PPA contracts revenue</div>
+          <div class="forecast-card-detail" id="forecast-comm-detail"></div>
+          <div class="forecast-card-total">
+            <span class="key" data-i18n="forecast_comm_total">Commercial total</span>
+            <span class="val" id="forecast-comm-total">—</span>
+          </div>
         </div>
-        <div class="ppa-kpi alt">
-          <div class="lbl" data-i18n="ppa_kpi_ppa">Simulated revenue (with PPA)</div>
-          <div class="val" id="ppa-sim">—</div>
-          <div class="delta" id="ppa-delta">—</div>
-        </div>
-        <div class="ppa-kpi">
-          <div class="lbl" data-i18n="ppa_kpi_breakeven">Break-even PPA price</div>
-          <div class="val" id="ppa-breakeven">—</div>
-          <div class="hint" data-i18n="ppa_kpi_breakeven_hint">Above this, PPA beats MCP</div>
+
+        <div class="forecast-card forecast-card-final" id="forecast-card-final">
+          <div class="forecast-card-label" data-i18n="forecast_final_title">FINAL FORECAST</div>
+          <div class="forecast-card-sub" data-i18n="forecast_final_sub">Expected revenue {{ forecast_data.cur_month_label }}</div>
+          <div class="forecast-final-figure" id="forecast-final-figure">—</div>
+          <div class="forecast-final-meta" id="forecast-final-meta"></div>
         </div>
       </div>
 
-      <!-- Monthly table -->
-      <div class="ppa-monthly-wrap">
-        <h4 data-i18n="ppa_monthly_title">Month-by-month comparison</h4>
-        <div class="events-table-wrap">
-          <table class="events-table ppa-table">
-            <thead>
-              <tr>
-                <th data-i18n="ppa_th_month">Month</th>
-                <th class="num" data-i18n="ppa_th_gen">MWh generated</th>
-                <th class="num" data-i18n="ppa_th_pld_sub">PLD sub (R$/MWh)</th>
-                <th class="num" data-i18n="ppa_th_mcp">Real MCP (R$M)</th>
-                <th class="num" data-i18n="ppa_th_ppa">With PPA (R$M)</th>
-                <th class="num" data-i18n="ppa_th_delta">Δ (R$M)</th>
-                <th data-i18n="ppa_th_better">Better</th>
-              </tr>
-            </thead>
-            <tbody id="ppa-monthly-rows"></tbody>
-          </table>
+      <!-- ========== 5. Short-position alert ========== -->
+      <div class="forecast-alert" id="forecast-alert" style="display:none">
+        <span class="forecast-alert-icon">⚠</span>
+        <div class="forecast-alert-body">
+          <strong data-i18n="forecast_alert_title">Short position warning</strong>
+          <p id="forecast-alert-text"></p>
         </div>
       </div>
 
-      <!-- Sensitivity Matrix -->
-      <div class="ppa-sensitivity-wrap">
-        <h4 data-i18n="ppa_sens_title">Sensitivity matrix: price × volume</h4>
-        <p class="ppa-sens-desc" data-i18n="ppa_sens_desc">
-          Δ revenue (PPA vs MCP) for the full grid of contracted price and
-          volume in the selected submarket. Green zone = PPA wins; red zone =
-          MCP wins. The black line marks break-even (Δ = 0). The star ★ shows
-          the current simulator point.
-        </p>
-        <div id="g_ppa_sensitivity" style="width:100%;height:520px"></div>
-        <p class="ppa-sens-hint" data-i18n="ppa_sens_hint">
-          Hover any cell to see the exact Δ. Click sliders above to move the ★
-          and explore. The matrix recomputes when you change submarket or
-          contract type.
-        </p>
+      <!-- ========== 6. PLD sensitivity strip ========== -->
+      <div class="forecast-sensitivity">
+        <h4 data-i18n="forecast_sens_title">PLD sensitivity (remaining days)</h4>
+        <p class="forecast-sens-desc" data-i18n="forecast_sens_desc">
+          What if PLD for the rest of the month is different from MTD average?
+          The base scenario assumes the same PLD continues. We re-price the
+          spot leg of CCEE for the projected remaining MWh.</p>
+        <div class="forecast-sens-grid" id="forecast-sens-grid"></div>
       </div>
 
-      <p class="ppa-disclaimer" data-i18n="ppa_disclaimer">
-        Simplified model. Real PPAs include curves of seasonal flex,
-        deviation penalties, regulated charges (TUST/TUSD), submarket
-        risk hedging fees, and credit terms not modeled here.
-        Use as directional reference, not for contract pricing.
+      <!-- ========== 7. Risk decomposition ========== -->
+      <div class="forecast-decomp">
+        <h4 data-i18n="forecast_decomp_title">Risk decomposition</h4>
+        <p class="forecast-decomp-desc" data-i18n="forecast_decomp_desc">
+          Where does the bottom line come from? Each component isolates one
+          economic driver of the result.</p>
+        <div class="forecast-decomp-grid" id="forecast-decomp-grid"></div>
+      </div>
+
+      <!-- ========== 8. Forecast vs yesterday ========== -->
+      <div class="forecast-history" id="forecast-history">
+        <h4 data-i18n="forecast_hist_title">Forecast tracking</h4>
+        <div id="forecast-hist-content"></div>
+      </div>
+
+      <p class="forecast-disclaimer" data-i18n="forecast_disclaimer">
+        Projection assumes the daily generation pace continues unchanged.
+        Real outcomes deviate due to weather, curtailment, and PLD volatility.
+        Use as directional reference, not as financial commitment.
       </p>
     </div>
+
+    {% endif %}
+
 
     <div class="bignum">
       <div class="figure">
@@ -4025,6 +4231,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 <script>
 const FIGS = {{ figs_json|safe }};
 const MOD_MENSAL = {{ mod_mensal_json|safe }};
+const FORECAST = {{ forecast_json|safe }};
 const BENCH_KPIS = {{ bench_kpis_json|safe }};
 
 // I18N dictionary
@@ -4038,6 +4245,43 @@ const I18N = {
     tab_ren: "Tracker REN 1.030",
     tab_solar: "Recurso Solar",
     tab_bench: "Benchmark",
+    forecast_title: "Previsão mensal",
+    forecast_tag: "INTERATIVO",
+    forecast_desc: "Projeta o resultado financeiro do mês baseado na geração realizada até agora + ritmo diário pros dias restantes. Configure seu portfólio de hedge (até 2 contratos) e veja como liquidação CCEE e receita comercial compõem o resultado.",
+    forecast_empty: "Sem dados pro mês corrente ainda. Aguarde o fim do dia pra ver a projeção.",
+    forecast_proj_title: "Projeção de geração",
+    forecast_realized: "Realizado MTD",
+    forecast_daily: "Média diária",
+    forecast_projected: "Projeção (restante)",
+    forecast_total: "Total previsto",
+    forecast_mwm: "MW médios",
+    forecast_contracts_title: "Portfólio de contratos",
+    forecast_btn_add_c2: "+ Adicionar 2º contrato",
+    forecast_btn_remove: "Remover",
+    forecast_contract_1: "Contrato 1",
+    forecast_contract_2: "Contrato 2",
+    forecast_volume: "Volume (MWh)",
+    forecast_price: "Preço (R$/MWh)",
+    forecast_submarket: "Submercado",
+    forecast_pld_title: "PLD referência (MTD)",
+    forecast_pld_sub: "Média horária do mês até hoje por submercado",
+    forecast_pld_eff: "Preço efetivo Mauriti",
+    forecast_pld_eff_sub: "(considera curtailment + modulação)",
+    forecast_ccee_title: "VISÃO CCEE",
+    forecast_ccee_sub: "Liquidação no spot ao PLD do submercado",
+    forecast_ccee_net: "Líquido CCEE",
+    forecast_comm_title: "VISÃO COMERCIAL",
+    forecast_comm_sub: "Receita dos contratos PPA",
+    forecast_comm_total: "Total comercial",
+    forecast_final_title: "PREVISÃO FINAL",
+    forecast_final_sub: "Receita esperada",
+    forecast_alert_title: "Alerta: posição curta",
+    forecast_sens_title: "Sensibilidade ao PLD (dias restantes)",
+    forecast_sens_desc: "E se o PLD do restante do mês for diferente da média MTD? O cenário base assume que o mesmo PLD continua. Repreçamos a parte spot da CCEE pros MWh remanescentes projetados.",
+    forecast_decomp_title: "Decomposição de risco",
+    forecast_decomp_desc: "De onde vem o resultado? Cada componente isola um driver econômico distinto.",
+    forecast_hist_title: "Tracking do forecast",
+    forecast_disclaimer: "A projeção assume que o ritmo diário continua inalterado. Resultados reais variam por clima, curtailment e volatilidade do PLD. Use como referência direcional, não como compromisso financeiro.",
     bench_kicker: "Comparação peer no CE · grupos pré-definidos",
     bench_h1_a: "Como Mauriti se compara",
     bench_h1_b: "contra seus peers?",
@@ -4394,458 +4638,500 @@ try {
 } catch(e) {}
 
 // ============================================================
-// PPA What-If Simulator (v5.4)
+// MONTHLY FORECAST (v5.6) — substitui o PPA What-If Simulator
 // ============================================================
-const ppaState = {
-  type: 'A',        // A = volume limited, B = all-take
-  price: 200,        // R$/MWh
-  volume: 20000,    // MWh/month (flat)
-  submercado: 'SECO', // submarket of delivery
-  // Second PPA (optional, only Caso A supported)
-  secondActive: false,
-  price2: 220,
-  volume2: 10000,
-  submercado2: 'S'
+const forecastState = {
+  c1: { vol: 37200, price: 116, sub: 'S' },
+  c2: { active: false, vol: 0, price: 200, sub: 'S' },
 };
 
-function ppaPldSub(monthEntry, sub) {
-  // Returns mean PLD for given submarket in given month
-  // Fallback: NE PLD (always available)
-  const data = monthEntry.pld_por_sub || {};
-  if (data[sub] && typeof data[sub].mean === 'number') return data[sub].mean;
-  if (data.NE && typeof data.NE.mean === 'number') return data.NE.mean;
-  return monthEntry.pld_medio_ne || 0;
-}
-
-function ppaCalc() {
-  const { price, volume, type, submercado,
-           secondActive, price2, volume2, submercado2 } = ppaState;
-  let total_ppa = 0, total_mcp = 0, total_gen = 0;
-  const rows = (MOD_MENSAL || []).map(m => {
-    const pld_sub = ppaPldSub(m, submercado);
-    const pld_sub2 = secondActive ? ppaPldSub(m, submercado2) : 0;
-    let ppa_rev;
-    if (type === 'B') {
-      // All-take: cliente leva toda a geracao ao preco fixo P
-      // (geracao real Mauriti × preco PPA). No second PPA in this mode.
-      ppa_rev = m.mwh_total * price;
-    } else {
-      // Volume limited flat horario:
-      // Receita total = receita_real + Σ_i [volume_i × (P_i - PLD_sub_i)]
-      // Cada PPA eh tratado independente (CCEE liquida horaria).
-      const extra1 = volume * (price - pld_sub);
-      const extra2 = secondActive ? volume2 * (price2 - pld_sub2) : 0;
-      ppa_rev = m.receita_real + extra1 + extra2;
-    }
-    total_ppa += ppa_rev;
-    total_mcp += m.receita_real;
-    total_gen += m.mwh_total;
-    return {
-      month_label: m.month_label,
-      gen: m.mwh_total,
-      pld_sub: pld_sub,
-      pld_sub2: pld_sub2,
-      mcp: m.receita_real,
-      ppa: ppa_rev,
-      delta: ppa_rev - m.receita_real
-    };
-  });
-
-  // Break-even: so faz sentido quando ha um unico PPA
-  // (com 2 PPAs, ha infinitos pares (P1, P2) que empatam — sem solucao unica)
-  let breakeven;
-  if (secondActive && type === 'A') {
-    breakeven = null;  // hidden in UI
-  } else if (type === 'B') {
-    // All-take: total_ppa = sum(gen) × P, so P_be = total_mcp / total_gen
-    breakeven = total_gen > 0 ? total_mcp / total_gen : 0;
-  } else {
-    // Volume limited:
-    // total_ppa = sum(receita_real) + volume × (P × n_meses - sum(PLD_sub))
-    // Setting total_ppa = total_mcp:
-    // volume × (P × n_meses - sum_PLD) = 0
-    // P = mean(PLD_sub)
-    const meanPld = MOD_MENSAL.reduce((s, m) => s + ppaPldSub(m, submercado), 0)
-                    / Math.max(1, MOD_MENSAL.length);
-    breakeven = meanPld;
-  }
-
-  return { rows, total_ppa, total_mcp, total_gen, breakeven };
-}
-
-function ppaFmtMoney(n) {
-  const sign = n < 0 ? '-' : '';
+function _fmtRs(n) {
+  const sign = n < 0 ? '-' : '+';
   const abs = Math.abs(n);
   if (abs >= 1e9) return `${sign}R$ ${(abs/1e9).toFixed(2)}B`;
   if (abs >= 1e6) return `${sign}R$ ${(abs/1e6).toFixed(2)}M`;
   if (abs >= 1e3) return `${sign}R$ ${(abs/1e3).toFixed(0)}k`;
   return `${sign}R$ ${abs.toFixed(0)}`;
 }
-
-function ppaRender() {
-  if (!MOD_MENSAL || MOD_MENSAL.length === 0) {
-    document.getElementById('ppa-real').textContent = '—';
-    document.getElementById('ppa-sim').textContent = '—';
-    return;
-  }
-  const r = ppaCalc();
-
-  document.getElementById('ppa-real').textContent = ppaFmtMoney(r.total_mcp);
-  document.getElementById('ppa-sim').textContent = ppaFmtMoney(r.total_ppa);
-
-  const delta = r.total_ppa - r.total_mcp;
-  const deltaPct = r.total_mcp !== 0 ? 100 * delta / r.total_mcp : 0;
-  const deltaEl = document.getElementById('ppa-delta');
-  const sign = delta >= 0 ? '+' : '';
-  deltaEl.textContent = `${sign}${ppaFmtMoney(delta)} (${sign}${deltaPct.toFixed(1)}%)`;
-  deltaEl.className = 'delta ' + (delta >= 0 ? 'good' : 'bad');
-
-  document.getElementById('ppa-breakeven').textContent =
-    r.breakeven === null ? '—' : 'R$ ' + Math.round(r.breakeven) + '/MWh';
-
-  // Volume hint: MWmed equivalent (rough)
-  const avgHoursMonth = MOD_MENSAL.length
-    ? MOD_MENSAL.reduce((s,m) => s + (m.n_horas_mes||720), 0) / MOD_MENSAL.length
-    : 720;
-  const mwmed = ppaState.volume / avgHoursMonth;
-  document.getElementById('ppa-volume-hint').textContent =
-    `≈ ${mwmed.toFixed(1)} MWmed (avg)`;
-  // Second PPA hint
-  if (ppaState.secondActive) {
-    const mwmed2 = ppaState.volume2 / avgHoursMonth;
-    const h2 = document.getElementById('ppa-volume-2-hint');
-    if (h2) h2.textContent = `≈ ${mwmed2.toFixed(1)} MWmed (avg)`;
-  }
-
-  // Update break-even hint when 2 PPAs (no unique break-even)
-  const beHintEl = document.querySelector('#ppa-breakeven').parentElement
-    .querySelector('.hint');
-  if (beHintEl) {
-    if (r.breakeven === null) {
-      beHintEl.textContent = (document.body.dataset.lang === 'pt'
-        ? 'Indefinido com 2 PPAs (combinação)'
-        : 'Undefined with 2 PPAs (combination)');
-    } else {
-      const lang = document.body.dataset.lang || 'en';
-      beHintEl.textContent = (I18N && I18N[lang] && I18N[lang].ppa_kpi_breakeven_hint)
-        || 'Above this, PPA beats MCP';
-    }
-  }
-
-  // Table
-  const tbody = document.getElementById('ppa-monthly-rows');
-  const has2 = ppaState.secondActive && ppaState.type === 'A';
-  tbody.innerHTML = r.rows.map(row => {
-    const cls = row.delta >= 0 ? 'win' : 'lose';
-    const s = row.delta >= 0 ? '+' : '';
-    const better_pt = row.delta >= 0 ? 'PPA ↑' : 'MCP ↑';
-    const pld2_cell = has2
-      ? `<td class="num">${Math.round(row.pld_sub2)}</td>`
-      : '';
-    return `
-      <tr class="${cls}">
-        <td>${row.month_label}</td>
-        <td class="num">${Math.round(row.gen).toLocaleString('en-US').replace(/,/g,' ')}</td>
-        <td class="num">${Math.round(row.pld_sub)}</td>
-        ${pld2_cell}
-        <td class="num">${(row.mcp/1e6).toFixed(2)}</td>
-        <td class="num">${(row.ppa/1e6).toFixed(2)}</td>
-        <td class="num delta">${s}${(row.delta/1e6).toFixed(2)}</td>
-        <td>${better_pt}</td>
-      </tr>
-    `;
-  }).join('');
-
-  // Toggle visibility of extra PLD column in header
-  const thead = document.querySelector('.ppa-table thead tr');
-  if (thead) {
-    const existing = thead.querySelector('.pld-sub2-col');
-    if (has2 && !existing) {
-      const newTh = document.createElement('th');
-      newTh.className = 'num pld-sub2-col';
-      newTh.textContent = document.body.dataset.lang === 'pt'
-        ? 'PLD 2º (R$/MWh)' : '2nd PLD (R$/MWh)';
-      // Insert after first PLD column (4th th, index 3)
-      thead.insertBefore(newTh, thead.children[3]);
-    } else if (!has2 && existing) {
-      existing.remove();
-    }
-  }
-
-  // Re-render the sensitivity matrix
-  ppaSensitivity();
+function _fmtRsNoSign(n) {
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `R$ ${(abs/1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `R$ ${(abs/1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `R$ ${(abs/1e3).toFixed(0)}k`;
+  return `R$ ${abs.toFixed(0)}`;
+}
+function _fmtMwh(n) {
+  return n.toLocaleString('en-US', {maximumFractionDigits: 0});
+}
+function _fmtMwm(n) { return n.toFixed(1); }
+function _pldSub(sub) {
+  if (!FORECAST || !FORECAST.pld_mtd_por_sub) return 0;
+  return FORECAST.pld_mtd_por_sub[sub] || 0;
 }
 
-// ============================================================
-// PPA Sensitivity Matrix (heatmap 2D price x volume)
-// ============================================================
-function ppaSensitivity() {
-  const el = document.getElementById('g_ppa_sensitivity');
-  if (!el || !MOD_MENSAL || MOD_MENSAL.length === 0) return;
+// ===== Core forecast calculation =====
+// Returns object with all financial outputs given current state.
+//
+// IMPORTANT — sensitivity model:
+// The PLD MTD is ALREADY REALIZED for the elapsed days — it's a fact,
+// not a variable. The pldRemainingMultiplier (only != 1.0 in sensitivity
+// scenarios) applies ONLY to the projected remaining MWh:
+//
+//   Component                Realized MTD (fixed)    Remaining (variable)
+//   ─────────────────────────────────────────────────────────────────
+//   G × PLD_eff              G_realized × PLD_eff    G_remaining × PLD_eff × mult
+//                            (uses MTD effective)    (assumes same curt %)
+//   C × PLD_sub              C_share_MTD × PLD_sub   C_share_rem × PLD_sub × mult
+//   Exposure × PLD_NE        Exp_MTD × PLD_NE        Exp_rem × PLD_NE × mult
+//
+// Contract volume is delivered FLAT across the month, so we split the
+// contracted volume in same proportion: elapsed_days / total_days.
+function computeForecast(pldRemainingMultiplier) {
+  if (!FORECAST || FORECAST.vazio) return null;
+  pldRemainingMultiplier = pldRemainingMultiplier || 1.0;
+  const mult = pldRemainingMultiplier;
 
-  const { type, submercado, price, volume } = ppaState;
+  // Time split
+  const days_total = FORECAST.days_total;
+  const days_elapsed = FORECAST.days_elapsed;
+  const days_remaining = FORECAST.days_remaining;
+  const frac_elapsed = days_total > 0 ? (days_elapsed / days_total) : 1;
+  const frac_remaining = 1 - frac_elapsed;
+
+  // Generation split
+  const G_realized = FORECAST.mwh_realized;
+  const G_remaining = FORECAST.mwh_projected_remaining;
+  const G = G_realized + G_remaining;
+
+  // PLD references (MTD = realized = fixed)
+  const PLD_NE_mtd  = FORECAST.pld_medio_ne;          // NE PLD MTD (fixed)
+  const PLD_eff_mtd = FORECAST.pld_efetivo_mauriti;   // Mauriti PLD eff MTD (fixed)
+  // Future projections (vary with sensitivity multiplier)
+  const PLD_NE_remaining = PLD_NE_mtd * mult;
+  // PLD_eff future: assume same curtailment % as MTD applies going forward
+  const curt_factor_implied = PLD_NE_mtd > 0
+    ? (PLD_eff_mtd / PLD_NE_mtd) : 1;
+  const PLD_eff_remaining = PLD_NE_remaining * curt_factor_implied;
+
+  // Effective blended PLD for display
+  const PLD_eff_blended = G > 0
+    ? (G_realized * PLD_eff_mtd + G_remaining * PLD_eff_remaining) / G
+    : PLD_eff_mtd;
+  const PLD_NE_blended = G > 0
+    ? (G_realized * PLD_NE_mtd + G_remaining * PLD_NE_remaining) / G
+    : PLD_NE_mtd;
+
+  // ===== Contracts =====
+  const c1 = forecastState.c1;
+  const c2 = forecastState.c2;
+  const C1_vol  = c1.vol;
+  const C1_price = c1.price;
+  const C1_sub_pld_mtd = _pldSub(c1.sub);
+  const C1_sub_pld_rem = C1_sub_pld_mtd * mult;
+  // Contract volume split: flat delivery — share proportional to time elapsed
+  const C1_vol_mtd = C1_vol * frac_elapsed;
+  const C1_vol_rem = C1_vol * frac_remaining;
+  // Blended PLD applied to contract (for display)
+  const C1_pld_blended = C_total_helper(C1_vol_mtd, C1_sub_pld_mtd,
+                                          C1_vol_rem, C1_sub_pld_rem);
+
+  const C2_vol  = c2.active ? c2.vol : 0;
+  const C2_price = c2.active ? c2.price : 0;
+  const C2_sub_pld_mtd = c2.active ? _pldSub(c2.sub) : 0;
+  const C2_sub_pld_rem = C2_sub_pld_mtd * mult;
+  const C2_vol_mtd = C2_vol * frac_elapsed;
+  const C2_vol_rem = C2_vol * frac_remaining;
+  const C2_pld_blended = c2.active
+    ? C_total_helper(C2_vol_mtd, C2_sub_pld_mtd, C2_vol_rem, C2_sub_pld_rem)
+    : 0;
+
+  // ===== Exposure split =====
+  // Exposure_MTD       = G_realized × frac_realized_in_total — share of mauriti
+  // Simpler: total exposure = G − (C1 + C2). Split by time fraction.
+  const C_total = C1_vol + C2_vol;
+  const Exposure = G - C_total;
+  const Exp_mtd = Exposure * frac_elapsed;
+  const Exp_rem = Exposure * frac_remaining;
+
+  // ===== CCEE View (detailed) =====
+  // Each line is sum of (realized leg) + (remaining leg with mult).
+  const ccee_spot_mtd = G_realized * PLD_eff_mtd;
+  const ccee_spot_rem = G_remaining * PLD_eff_remaining;
+  const ccee_total_spot = ccee_spot_mtd + ccee_spot_rem;
+
+  const ccee_c1_buy_mtd = -(C1_vol_mtd * C1_sub_pld_mtd);
+  const ccee_c1_buy_rem = -(C1_vol_rem * C1_sub_pld_rem);
+  const ccee_c1_buy = ccee_c1_buy_mtd + ccee_c1_buy_rem;
+
+  const ccee_c2_buy_mtd = -(C2_vol_mtd * C2_sub_pld_mtd);
+  const ccee_c2_buy_rem = -(C2_vol_rem * C2_sub_pld_rem);
+  const ccee_c2_buy = ccee_c2_buy_mtd + ccee_c2_buy_rem;
+
+  const ccee_exp_mtd = Exp_mtd * PLD_NE_mtd;
+  const ccee_exp_rem = Exp_rem * PLD_NE_remaining;
+  const ccee_exposure = ccee_exp_mtd + ccee_exp_rem;
+
+  const ccee_net = ccee_total_spot + ccee_c1_buy + ccee_c2_buy + ccee_exposure;
+
+  // ===== Commercial View =====
+  // Commercial leg uses fixed contract price independent of PLD
+  const comm_c1 = C1_vol * C1_price;
+  const comm_c2 = C2_vol * C2_price;
+  const comm_total = comm_c1 + comm_c2;
+
+  const final_total = ccee_net + comm_total;
+
+  // ===== Risk decomposition =====
+  const PLD_sub_blended_weighted = C_total > 0
+    ? ((C1_vol * C1_pld_blended) + (C2_vol * C2_pld_blended)) / C_total
+    : PLD_NE_blended;
+  const price_weighted = C_total > 0
+    ? ((C1_vol * C1_price) + (C2_vol * C2_price)) / C_total : 0;
+  const decomp_hedge      = C_total * (price_weighted - PLD_sub_blended_weighted);
+  const decomp_spot_long  = Math.max(0, Exposure) * PLD_NE_blended;
+  const decomp_spot_short = Math.min(0, Exposure) * PLD_NE_blended;
+  const decomp_basis      = C_total * (PLD_NE_blended - PLD_sub_blended_weighted);
+  const decomp_curt       = G * (PLD_eff_blended - PLD_NE_blended);
+
+  return {
+    G, G_realized, G_remaining,
+    PLD_NE: PLD_NE_mtd, PLD_NE_blended,
+    PLD_eff: PLD_eff_mtd, PLD_eff_blended,
+    C1_vol, C1_price, C1_pld: C1_pld_blended, C1_sub: c1.sub,
+    C2_vol, C2_price, C2_pld: C2_pld_blended, C2_sub: c2.sub,
+    c2_active: c2.active,
+    C_total, Exposure,
+    ccee_total_spot, ccee_c1_buy, ccee_c2_buy, ccee_exposure, ccee_net,
+    comm_c1, comm_c2, comm_total,
+    final_total,
+    decomp_hedge, decomp_spot_long, decomp_spot_short, decomp_basis, decomp_curt,
+  };
+}
+
+// Helper: weighted-average PLD across MTD and remaining legs of a contract
+function C_total_helper(vol_mtd, pld_mtd, vol_rem, pld_rem) {
+  const total = vol_mtd + vol_rem;
+  if (total <= 0) return 0;
+  return (vol_mtd * pld_mtd + vol_rem * pld_rem) / total;
+}
+
+// ===== Render functions =====
+function forecastRender() {
+  if (!FORECAST || FORECAST.vazio) return;
   const lang = document.body.dataset.lang || 'en';
+  const I = (lang === 'pt') ? {
+    mwm: 'MW médios',
+    portfolio: 'Portfólio',
+    portfolio_total: 'Total contratado',
+    of_forecast: 'da projeção',
+    exposure: 'Exposição',
+    long: '(excedente)', short: '(curta)',
+    alert: 'Posição curta',
+    alert_p: pre => `Você terá que comprar ${pre} MWh no spot pra honrar contratos. Aporte CCEE: `,
+    pld_eff: 'Preço efetivo Mauriti',
+    pld_eff_sub: '(incorpora curtailment + modulação)',
+    revenue_total: 'Faturamento total previsto',
+    scen_low: 'PLD −20%', scen_base: 'Base (MTD)', scen_high: 'PLD +20%',
+    pld_future_label: 'PLD remanescente',
+    delta_vs_base: 'vs base',
+    decomp_hedge: 'Hedge dos PPAs',
+    decomp_hedge_sub: 'C × (Preço − PLD do submercado)',
+    decomp_long: 'Excedente vendido',
+    decomp_long_sub: 'Exposição positiva × PLD NE',
+    decomp_short: 'Compra de cobertura',
+    decomp_short_sub: 'Exposição negativa × PLD NE',
+    decomp_basis: 'Diferencial de submercado',
+    decomp_basis_sub: 'C × (PLD NE − PLD do contrato)',
+    decomp_curt: 'Efeito do curtailment',
+    decomp_curt_sub: 'G × (PLD efetivo − PLD NE)',
+    total: 'Total',
+    hist_no_data: 'Coletando histórico — comparativo dia-a-dia aparece após 24h.',
+    hist_today: 'Forecast hoje',
+    hist_yesterday: 'Forecast ontem',
+    hist_change: 'Variação',
+  } : {
+    mwm: 'MW avg',
+    portfolio: 'Portfolio',
+    portfolio_total: 'Total contracted',
+    of_forecast: 'of forecast',
+    exposure: 'Exposure',
+    long: '(long)', short: '(short)',
+    alert: 'Short position warning',
+    alert_p: pre => `You will have to buy ${pre} MWh on the spot market to honor contracts. Estimated CCEE call: `,
+    pld_eff: 'Mauriti effective price',
+    pld_eff_sub: '(incorporates curtailment + modulation)',
+    revenue_total: 'Total forecasted revenue',
+    scen_low: 'PLD −20%', scen_base: 'Base (MTD)', scen_high: 'PLD +20%',
+    pld_future_label: 'PLD remaining',
+    delta_vs_base: 'vs base',
+    decomp_hedge: 'PPA hedge gain',
+    decomp_hedge_sub: 'C × (Price − PLD of submarket)',
+    decomp_long: 'Spot long revenue',
+    decomp_long_sub: 'Positive exposure × NE PLD',
+    decomp_short: 'Spot short cover',
+    decomp_short_sub: 'Negative exposure × NE PLD',
+    decomp_basis: 'Submarket basis',
+    decomp_basis_sub: 'C × (NE PLD − contract PLD)',
+    decomp_curt: 'Curtailment penalty',
+    decomp_curt_sub: 'G × (effective PLD − NE PLD)',
+    total: 'Total',
+    hist_no_data: 'Collecting history — daily comparison will appear after 24h.',
+    hist_today: 'Forecast today',
+    hist_yesterday: 'Forecast yesterday',
+    hist_change: 'Change',
+  };
 
-  // Pre-compute totals invariant for the grid
-  const totalGen = MOD_MENSAL.reduce((s, m) => s + m.mwh_total, 0);
-  const totalMcp = MOD_MENSAL.reduce((s, m) => s + m.receita_real, 0);
-  const sumPldSub = MOD_MENSAL.reduce(
-    (s, m) => s + ppaPldSub(m, submercado), 0);
-  const meanPldSub = sumPldSub / MOD_MENSAL.length;
-  const nMonths = MOD_MENSAL.length;
+  // ===== 1. Projection card =====
+  document.getElementById('fp-realized').textContent = _fmtMwh(FORECAST.mwh_realized);
+  document.getElementById('fp-daily').textContent = _fmtMwh(FORECAST.daily_avg);
+  document.getElementById('fp-projected').textContent = _fmtMwh(FORECAST.mwh_projected_remaining);
+  document.getElementById('fp-total').textContent = _fmtMwh(FORECAST.mwh_total_forecast);
+  const mwm_total = FORECAST.mwh_total_forecast / Math.max(FORECAST.n_horas_mes, 1);
+  document.getElementById('fp-mwm').textContent = _fmtMwm(mwm_total);
 
-  // Build grid
-  const priceMin = 100, priceMax = 350, priceStep = 12.5;  // 21 points
-  const volMin = 0,    volMax = 50000, volStep = 2500;     // 21 points
-  const prices = [], volumes = [];
-  for (let p = priceMin; p <= priceMax; p += priceStep) prices.push(p);
-  for (let v = volMin;   v <= volMax;   v += volStep)   volumes.push(v);
-
-  // Delta function for current submercado choice
-  // Caso A: delta = sum_i [vol × (P - PLD_sub_i)]
-  //               = vol × (P × N - sumPldSub)
-  //               = vol × N × (P - meanPldSub)
-  // Caso B: delta = sum_i [gen_i × (P - PLD_efetivo_i)]
-  //               = P × totalGen - totalMcp
-  function deltaAt(P, V) {
-    if (type === 'B') {
-      // Volume irrelevant in all-take mode
-      return P * totalGen - totalMcp;
-    } else {
-      return V * nMonths * (P - meanPldSub);
-    }
+  // Hints for sliders (MW médios equivalente)
+  const horas = FORECAST.n_horas_mes;
+  const c1_mwm = horas > 0 ? (forecastState.c1.vol / horas) : 0;
+  const c2_mwm = horas > 0 ? (forecastState.c2.vol / horas) : 0;
+  document.getElementById('fc-c1-vol-hint').textContent =
+    `≈ ${_fmtMwm(c1_mwm)} ${I.mwm}`;
+  if (forecastState.c2.active) {
+    document.getElementById('fc-c2-vol-hint').textContent =
+      `≈ ${_fmtMwm(c2_mwm)} ${I.mwm}`;
   }
 
-  // Build z matrix (volumes as rows, prices as cols)
-  const z = volumes.map(v =>
-    prices.map(p => deltaAt(p, v) / 1e6)  // R$ M
-  );
+  // ===== 3. PLD reference =====
+  const pldGrid = document.getElementById('forecast-pld-grid');
+  if (pldGrid) {
+    const subs = FORECAST.pld_mtd_por_sub || {};
+    pldGrid.innerHTML = Object.entries(subs).map(([sub, pld]) =>
+      `<div class="forecast-pld-cell">
+        <div class="sub">${sub}</div>
+        <div class="val">${Math.round(pld)}<span class="unit"> R$/MWh</span></div>
+      </div>`
+    ).join('');
+  }
+  document.getElementById('fp-pld-eff').textContent =
+    `R$ ${Math.round(FORECAST.pld_efetivo_mauriti)}/MWh`;
 
-  // For colour scale: symmetric around 0
-  const flat = z.flat();
-  const absMax = Math.max(Math.abs(Math.min(...flat)),
-                          Math.abs(Math.max(...flat)));
+  // ===== Core computation =====
+  const fc = computeForecast(1.0);
 
-  // Build hover text (rich tooltip)
-  const customdata = volumes.map((v, iy) =>
-    prices.map((p, ix) => {
-      const dRs = z[iy][ix] * 1e6;
-      const roi = totalMcp > 0 ? (100 * dRs / totalMcp) : 0;
-      return {p: p, v: v, d_rs: dRs, roi: roi};
-    })
-  );
+  // ===== 2. Portfolio summary line =====
+  const portfolioSum = document.getElementById('forecast-portfolio-summary');
+  if (portfolioSum) {
+    const pct = FORECAST.mwh_total_forecast > 0
+      ? (100 * fc.C_total / FORECAST.mwh_total_forecast) : 0;
+    const expClass = fc.Exposure >= 0 ? 'long' : 'short';
+    portfolioSum.innerHTML =
+      `<span><strong>${I.portfolio_total}:</strong> ${_fmtMwh(fc.C_total)} MWh (${pct.toFixed(0)}% ${I.of_forecast})</span>
+       <span><strong>${I.exposure}:</strong> ${fc.Exposure >= 0 ? '+' : ''}${_fmtMwh(fc.Exposure)} MWh ${I[expClass]}</span>`;
+  }
 
-  const hoverTemplate = lang === 'pt'
-    ? '<b>Preço:</b> R$ %{x:.0f}/MWh<br>' +
-      '<b>Volume:</b> %{y:,.0f} MWh/mês<br>' +
-      '<b>Δ Receita:</b> R$ %{customdata.d_rs:,.2s}<br>' +
-      '<b>ROI vs MCP:</b> %{customdata.roi:+.1f}%' +
-      '<extra></extra>'
-    : '<b>Price:</b> R$ %{x:.0f}/MWh<br>' +
-      '<b>Volume:</b> %{y:,.0f} MWh/month<br>' +
-      '<b>Δ Revenue:</b> R$ %{customdata.d_rs:,.2s}<br>' +
-      '<b>ROI vs MCP:</b> %{customdata.roi:+.1f}%' +
-      '<extra></extra>';
+  // ===== 4. CCEE view detail =====
+  const cceeDetail = document.getElementById('forecast-ccee-detail');
+  if (cceeDetail) {
+    cceeDetail.innerHTML = [
+      {label: `G × PLD_eff`, val: fc.ccee_total_spot, cls: fc.ccee_total_spot >= 0 ? 'is-pos' : 'is-neg'},
+      {label: `− C1 × PLD<sub>${fc.C1_sub}</sub>`, val: fc.ccee_c1_buy, cls: fc.ccee_c1_buy >= 0 ? 'is-pos' : 'is-neg'},
+      ...(fc.c2_active ? [{label: `− C2 × PLD<sub>${fc.C2_sub}</sub>`, val: fc.ccee_c2_buy, cls: fc.ccee_c2_buy >= 0 ? 'is-pos' : 'is-neg'}] : []),
+      {label: `${fc.Exposure >= 0 ? '+' : ''} Exp × PLD<sub>NE</sub>`, val: fc.ccee_exposure, cls: fc.ccee_exposure >= 0 ? 'is-pos' : 'is-neg'},
+    ].map(r =>
+      `<div class="forecast-card-row ${r.cls}">
+        <span class="label">${r.label}</span>
+        <span class="value">${_fmtRs(r.val)}</span>
+      </div>`
+    ).join('');
+  }
+  document.getElementById('forecast-ccee-net').textContent = _fmtRs(fc.ccee_net);
 
-  const heatmap = {
-    type: 'heatmap',
-    x: prices,
-    y: volumes,
-    z: z,
-    customdata: customdata,
-    hovertemplate: hoverTemplate,
-    colorscale: [
-      [0.0, '#7a1a0a'],   // dark red
-      [0.25, '#d92e0f'],  // accent_today
-      [0.5, '#f5efe0'],   // neutral panel
-      [0.75, '#5a8a6a'],  // soft green
-      [1.0, '#1f3d29']    // dark green
-    ],
-    zmid: 0,
-    zmin: -absMax,
-    zmax: absMax,
-    colorbar: {
-      title: {text: lang === 'pt' ? 'Δ R$ M' : 'Δ R$ M',
-              font: {family: 'IBM Plex Mono', size: 11}},
-      thickness: 14, len: 0.85,
-      tickfont: {family: 'IBM Plex Mono', size: 10}
+  // ===== Commercial view detail =====
+  const commDetail = document.getElementById('forecast-comm-detail');
+  if (commDetail) {
+    let html = `<div class="forecast-card-row is-pos">
+        <span class="label">C1: ${_fmtMwh(fc.C1_vol)} × R$ ${fc.C1_price}</span>
+        <span class="value">${_fmtRs(fc.comm_c1)}</span></div>`;
+    if (fc.c2_active) {
+      html += `<div class="forecast-card-row is-pos">
+        <span class="label">C2: ${_fmtMwh(fc.C2_vol)} × R$ ${fc.C2_price}</span>
+        <span class="value">${_fmtRs(fc.comm_c2)}</span></div>`;
     }
-  };
+    commDetail.innerHTML = html;
+  }
+  document.getElementById('forecast-comm-total').textContent = _fmtRs(fc.comm_total);
 
-  // Break-even line (Caso A: vertical at P = meanPldSub)
-  // (Caso B: vertical at P = totalMcp/totalGen = pld_efetivo geral)
-  const beX = type === 'B'
-    ? (totalGen > 0 ? totalMcp / totalGen : meanPldSub)
-    : meanPldSub;
-  const breakEvenLine = {
-    type: 'scatter', mode: 'lines',
-    x: [beX, beX], y: [volMin, volMax],
-    line: {color: '#1a1a1a', width: 2, dash: 'solid'},
-    name: lang === 'pt' ? 'Break-even' : 'Break-even',
-    hovertemplate: (lang === 'pt'
-      ? 'Break-even = R$ %{x:.0f}/MWh'
-      : 'Break-even = R$ %{x:.0f}/MWh') + '<extra></extra>',
-    showlegend: true
-  };
+  // ===== Final card (semantic colour) =====
+  const cardFinal = document.getElementById('forecast-card-final');
+  cardFinal.classList.remove('is-pos', 'is-neg');
+  cardFinal.classList.add(fc.final_total >= 0 ? 'is-pos' : 'is-neg');
+  const finalFig = document.getElementById('forecast-final-figure');
+  finalFig.textContent = _fmtRs(fc.final_total);
+  document.getElementById('forecast-final-meta').innerHTML =
+    `${I.revenue_total}<br>${I.pld_eff}: <strong>R$ ${Math.round(fc.PLD_eff_blended)}/MWh</strong>`;
 
-  // Current simulator point ★
-  const star = {
-    type: 'scatter', mode: 'markers+text',
-    x: [price], y: [type === 'B' ? volMax * 0.5 : volume],
-    marker: {symbol: 'star', size: 22, color: '#d92e0f',
-             line: {color: '#1a1a1a', width: 1.5}},
-    text: [lang === 'pt' ? 'Atual' : 'Current'],
-    textposition: 'top center',
-    textfont: {family: 'IBM Plex Mono', size: 10, color: '#1a1a1a'},
-    name: lang === 'pt' ? 'Ponto atual' : 'Current point',
-    hovertemplate: (lang === 'pt'
-      ? 'Configuração atual<br>P=R$ %{x:.0f} V=%{y:,.0f}'
-      : 'Current setting<br>P=R$ %{x:.0f} V=%{y:,.0f}') + '<extra></extra>',
-    showlegend: true
-  };
+  // ===== 5. Alert short position =====
+  const alertEl = document.getElementById('forecast-alert');
+  if (fc.Exposure < 0) {
+    const shortMwh = Math.abs(fc.Exposure);
+    const aporteEstimado = shortMwh * fc.PLD_NE_blended;
+    alertEl.style.display = 'flex';
+    document.getElementById('forecast-alert-text').innerHTML =
+      I.alert_p(_fmtMwh(shortMwh)) + `<strong>${_fmtRsNoSign(aporteEstimado)}</strong>`;
+  } else {
+    alertEl.style.display = 'none';
+  }
 
-  const subLabel = {
-    NE: 'NE', SECO: 'SE/CO', S: 'S', N: 'N'
-  }[submercado] || submercado;
-  const typeLabel = type === 'B'
-    ? (lang === 'pt' ? 'All-take' : 'All-take')
-    : (lang === 'pt' ? 'Volume limitado' : 'Volume limited');
+  // ===== 6. PLD sensitivity strip =====
+  const sensGrid = document.getElementById('forecast-sens-grid');
+  if (sensGrid) {
+    const scenarios = [
+      {key: 'low',  label: I.scen_low,  mult: 0.8,  cls: ''},
+      {key: 'base', label: I.scen_base, mult: 1.0,  cls: 'is-base'},
+      {key: 'high', label: I.scen_high, mult: 1.2,  cls: ''},
+    ];
+    const base = fc.final_total;
+    sensGrid.innerHTML = scenarios.map(s => {
+      const fs = computeForecast(s.mult);
+      if (!fs) return '';
+      const delta = fs.final_total - base;
+      const deltaCls = s.mult === 1.0 ? ''
+        : (delta > 0 ? 'is-up' : 'is-down');
+      const pldFuture = Math.round(FORECAST.pld_medio_ne * s.mult);
+      return `<div class="forecast-sens-cell ${s.cls}">
+        <div class="scenario">${s.label}</div>
+        <div class="pld-future">${I.pld_future_label}: <strong>R$ ${pldFuture}/MWh</strong></div>
+        <div class="result">${_fmtRs(fs.final_total)}</div>
+        ${s.mult !== 1.0 ? `<div class="delta ${deltaCls}">${delta >= 0 ? '+' : ''}${_fmtRsNoSign(delta)} ${I.delta_vs_base}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
 
-  const layout = {
-    title: {
-      text: (lang === 'pt'
-        ? `Δ Receita anual (R$ M) — ${typeLabel} · entrega no ${subLabel} · ${nMonths} meses`
-        : `Annual Δ revenue (R$ M) — ${typeLabel} · delivery in ${subLabel} · ${nMonths} months`),
-      font: {family: 'IBM Plex Mono', size: 12, color: '#1a1a1a'},
-      x: 0.02, xanchor: 'left'
-    },
-    xaxis: {
-      title: {text: lang === 'pt' ? 'Preço PPA (R$/MWh)' : 'PPA price (R$/MWh)',
-              font: {family: 'IBM Plex Mono', size: 11}},
-      tickfont: {family: 'IBM Plex Mono', size: 10}
-    },
-    yaxis: {
-      title: {text: lang === 'pt' ? 'Volume contratado (MWh/mês)' : 'Contracted volume (MWh/month)',
-              font: {family: 'IBM Plex Mono', size: 11}},
-      tickfont: {family: 'IBM Plex Mono', size: 10},
-      tickformat: ',d'
-    },
-    margin: {l: 100, r: 60, t: 50, b: 60},
-    paper_bgcolor: 'transparent',
-    plot_bgcolor: 'transparent',
-    showlegend: true,
-    legend: {
-      x: 0.5, y: -0.18, xanchor: 'center', orientation: 'h',
-      font: {family: 'IBM Plex Mono', size: 10}
+  // ===== 7. Risk decomposition =====
+  const decompGrid = document.getElementById('forecast-decomp-grid');
+  if (decompGrid) {
+    const components = [
+      {label: I.decomp_hedge, sub: I.decomp_hedge_sub, val: fc.decomp_hedge},
+      {label: I.decomp_long,  sub: I.decomp_long_sub,  val: fc.decomp_spot_long},
+      ...(fc.decomp_spot_short < 0
+        ? [{label: I.decomp_short, sub: I.decomp_short_sub, val: fc.decomp_spot_short}]
+        : []),
+      {label: I.decomp_basis, sub: I.decomp_basis_sub, val: fc.decomp_basis},
+      {label: I.decomp_curt,  sub: I.decomp_curt_sub,  val: fc.decomp_curt},
+    ];
+    const maxAbs = Math.max(...components.map(c => Math.abs(c.val)));
+    const renderRow = (c) => {
+      const pct = maxAbs > 0 ? (100 * Math.abs(c.val) / maxAbs) : 0;
+      const cls = c.val >= 0 ? 'is-pos' : 'is-neg';
+      return `<div class="forecast-decomp-row">
+        <span class="label">${c.label}<small>${c.sub}</small></span>
+        <span class="bar-wrap"><span class="bar ${cls}" style="width:${pct}%"></span></span>
+        <span class="value ${cls}">${_fmtRs(c.val)}</span>
+      </div>`;
+    };
+    const sumDecomp = components.reduce((s, c) => s + c.val, 0);
+    decompGrid.innerHTML = components.map(renderRow).join('') +
+      `<div class="forecast-decomp-row is-total">
+        <span class="label">${I.total}</span>
+        <span></span>
+        <span class="value">${_fmtRs(sumDecomp)}</span>
+      </div>`;
+  }
+
+  // ===== 8. History (forecast today vs yesterday) =====
+  const histContent = document.getElementById('forecast-hist-content');
+  if (histContent) {
+    if (!FORECAST.yesterday) {
+      histContent.innerHTML = `<p class="forecast-hist-empty">${I.hist_no_data}</p>`;
+    } else {
+      // Comparison: forecast today's mwh_total vs yesterday's forecast.
+      // We can't recompute yesterday's full revenue (we didn't save the
+      // contracts setup), so we compare just the GENERATION forecast,
+      // which is operationally meaningful by itself.
+      const tToday = FORECAST.mwh_total_forecast;
+      const tYest = FORECAST.yesterday.mwh_total_forecast;
+      const dGen = tToday - tYest;
+      const dGenCls = dGen >= 0 ? 'is-up' : 'is-down';
+      // Compute revenue under same contract setup BUT using yesterday's
+      // PLD/efetivo for comparison. Simpler: just compare forecasts of G.
+      histContent.innerHTML = `
+        <div class="forecast-hist-row">
+          <span class="label">${I.hist_today} (generation)</span>
+          <span class="val">${_fmtMwh(tToday)} MWh</span>
+        </div>
+        <div class="forecast-hist-row">
+          <span class="label">${I.hist_yesterday} (generation)</span>
+          <span class="val">${_fmtMwh(tYest)} MWh</span>
+        </div>
+        <div class="forecast-hist-row">
+          <span class="label">${I.hist_change}</span>
+          <span class="val">${dGen >= 0 ? '+' : ''}${_fmtMwh(dGen)} MWh
+            <span class="delta ${dGenCls}">(${dGen >= 0 ? '+' : ''}${(100*dGen/Math.max(tYest,1)).toFixed(1)}%)</span>
+          </span>
+        </div>`;
     }
-  };
-
-  Plotly.react(el, [heatmap, breakEvenLine, star], layout, {
-    responsive: true, displaylogo: false,
-    modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d',
-                              'zoomIn2d', 'zoomOut2d']
-  });
+  }
 }
 
-function ppaInit() {
-  if (!MOD_MENSAL || MOD_MENSAL.length === 0) {
-    console.warn('PPA simulator: no monthly data available');
-    return;
-  }
+function forecastInit() {
+  if (!FORECAST || FORECAST.vazio) return;
 
-  // Helper to sync slider <-> number input
-  function syncPair(rangeId, numId, key) {
+  // Wire up sliders: sync range <-> number, then re-render
+  function wireSlider(rangeId, numId, getter, setter) {
     const r = document.getElementById(rangeId);
     const n = document.getElementById(numId);
     if (!r || !n) return;
-    const onChange = (src) => {
-      const val = parseFloat(src.value);
-      if (isNaN(val)) return;
-      if (src === r) n.value = val;
-      else r.value = val;
-      ppaState[key] = val;
-      ppaRender();
-    };
-    r.addEventListener('input', () => onChange(r));
-    n.addEventListener('input', () => onChange(n));
+    r.value = getter(); n.value = getter();
+    r.addEventListener('input', () => {
+      n.value = r.value; setter(parseFloat(r.value)); forecastRender();
+    });
+    n.addEventListener('input', () => {
+      const v = parseFloat(n.value) || 0;
+      r.value = v; setter(v); forecastRender();
+    });
   }
-  syncPair('ppa-price', 'ppa-price-num', 'price');
-  syncPair('ppa-volume', 'ppa-volume-num', 'volume');
-  // 2nd PPA sliders
-  syncPair('ppa-price-2', 'ppa-price-2-num', 'price2');
-  syncPair('ppa-volume-2', 'ppa-volume-2-num', 'volume2');
+  wireSlider('fc-c1-vol', 'fc-c1-vol-num',
+    () => forecastState.c1.vol, v => forecastState.c1.vol = v);
+  wireSlider('fc-c1-price', 'fc-c1-price-num',
+    () => forecastState.c1.price, v => forecastState.c1.price = v);
+  wireSlider('fc-c2-vol', 'fc-c2-vol-num',
+    () => forecastState.c2.vol, v => forecastState.c2.vol = v);
+  wireSlider('fc-c2-price', 'fc-c2-price-num',
+    () => forecastState.c2.price, v => forecastState.c2.price = v);
 
-  // Submercado dropdown
-  const sub = document.getElementById('ppa-submercado');
-  if (sub) {
-    sub.addEventListener('change', () => {
-      ppaState.submercado = sub.value;
-      ppaRender();
-    });
-  }
-  const sub2 = document.getElementById('ppa-submercado-2');
-  if (sub2) {
-    sub2.addEventListener('change', () => {
-      ppaState.submercado2 = sub2.value;
-      ppaRender();
-    });
-  }
-
-  // Toggle PPA type
-  const addWrap = document.getElementById('ppa-add-second-wrap');
-  const secondRow = document.getElementById('ppa-second-row');
-  document.querySelectorAll('.ppa-type-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.ppa-type-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      ppaState.type = btn.dataset.type;
-      // Disable volume input on type B (all-take = volume is not used)
-      const volGroup = document.getElementById('ppa-volume-group');
-      if (volGroup) {
-        if (ppaState.type === 'B') volGroup.classList.add('hidden');
-        else volGroup.classList.remove('hidden');
-      }
-      // Hide "add second PPA" UI when type B (combination doesn't make sense)
-      if (addWrap) addWrap.style.display = ppaState.type === 'B' ? 'none' : 'flex';
-      if (ppaState.type === 'B' && ppaState.secondActive) {
-        // Auto-collapse second PPA when switching to all-take
-        ppaState.secondActive = false;
-        if (secondRow) secondRow.style.display = 'none';
-        const addBtn = document.getElementById('ppa-add-btn');
-        if (addBtn) addBtn.classList.remove('hidden');
-      }
-      ppaRender();
-    });
+  document.getElementById('fc-c1-sub').addEventListener('change', e => {
+    forecastState.c1.sub = e.target.value; forecastRender();
+  });
+  document.getElementById('fc-c2-sub').addEventListener('change', e => {
+    forecastState.c2.sub = e.target.value; forecastRender();
   });
 
-  // "+ Add second PPA" button
-  const addBtn = document.getElementById('ppa-add-btn');
+  // Toggle 2nd contract
+  const addBtn = document.getElementById('forecast-add-c2');
+  const removeBtn = document.getElementById('forecast-remove-c2');
+  const c2Wrap = document.getElementById('fc-c2-wrap');
   if (addBtn) {
     addBtn.addEventListener('click', () => {
-      ppaState.secondActive = true;
-      if (secondRow) secondRow.style.display = 'block';
-      addBtn.classList.add('hidden');
-      ppaRender();
+      forecastState.c2.active = true;
+      c2Wrap.style.display = 'block';
+      addBtn.style.display = 'none';
+      forecastRender();
     });
   }
-  // "× Remove second PPA" button
-  const removeBtn = document.getElementById('ppa-remove-btn');
   if (removeBtn) {
     removeBtn.addEventListener('click', () => {
-      ppaState.secondActive = false;
-      if (secondRow) secondRow.style.display = 'none';
-      if (addBtn) addBtn.classList.remove('hidden');
-      ppaRender();
+      forecastState.c2.active = false;
+      c2Wrap.style.display = 'none';
+      addBtn.style.display = 'inline-block';
+      forecastRender();
     });
   }
 
-  ppaRender();
+  forecastRender();
 }
 
-ppaInit();
+forecastInit();
+window.addEventListener('mauriti-lang-changed', forecastRender);
 
-// Re-render PPA table when language toggle is fired
-window.addEventListener('mauriti-lang-changed', ppaRender);
 
 // ============================================================
 // BENCHMARK BUILDER (Tab: bench) — multi-select + time series
@@ -5589,6 +5875,118 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                   f"{len(mod_mensal_data)} meses, submercados disponiveis: "
                   f"{sorted(set(s for m in mod_mensal_data for s in m['pld_por_sub']))}")
 
+    # ========== MONTHLY FORECAST DATA (v5.6) ==========
+    # Substitui o simulador PPA historico por uma projecao do mes corrente:
+    # geracao projetada (MTD + media_diaria * dias_restantes), PLD MTD por
+    # submercado (pra contratos), PLD efetivo Mauriti, e snapshot do dia
+    # salvo em forecast_history.json pra comparacao dia-a-dia.
+    forecast_data = {"vazio": True}
+    if not cur_m.empty:
+        # Dias no mes total e ja decorridos
+        if cur_first.month == 12:
+            next_first = date(cur_first.year + 1, 1, 1)
+        else:
+            next_first = date(cur_first.year, cur_first.month + 1, 1)
+        days_total_mes = (next_first - cur_first).days
+        days_elapsed = int(len(cur_m))
+        days_remaining = max(days_total_mes - days_elapsed, 0)
+
+        mwh_realized = float(cur_m["mwh_dia"].sum())
+        daily_avg = mwh_realized / max(days_elapsed, 1)
+        mwh_projected_remaining = daily_avg * days_remaining
+        mwh_total_forecast = mwh_realized + mwh_projected_remaining
+
+        # PLD MTD por submercado (filtra PLD raw pelo mes corrente)
+        pld_mtd_por_sub = {}
+        if not pld.empty:
+            pld_mes = pld[(pld["din_instante"] >= pd.Timestamp(cur_first)) &
+                            (pld["din_instante"] < pd.Timestamp(today + timedelta(days=1)))].copy()
+            if not pld_mes.empty and "sub" in pld_mes.columns:
+                norm = {"NORDESTE": "NE", "NORTE": "N",
+                          "SUDESTE": "SE", "SUL": "S"}
+                pld_mes["sub_code"] = (pld_mes["sub"].astype(str)
+                                          .str.upper().str.strip()
+                                          .map(lambda x: norm.get(x, x)))
+                for sub_code, grp in pld_mes.groupby("sub_code"):
+                    pld_mtd_por_sub[sub_code] = round(
+                        float(grp["pld"].mean()), 2)
+        # Fallback se PLD nao tiver: usar PLD do mod_mensal_data do mes
+        if not pld_mtd_por_sub and mod_mensal_data:
+            mes_str = cur_first.strftime("%Y-%m")
+            for m in mod_mensal_data:
+                if m["month"] == mes_str:
+                    for sub, info in m.get("pld_por_sub", {}).items():
+                        pld_mtd_por_sub[sub] = info.get("mean", 0)
+                    break
+
+        # PLD efetivo Mauriti no mes (ja calculado em mod_summary)
+        pld_efetivo_mauriti = float(pld_efetivo_mes) if mwh_total > 0 else 0.0
+        pld_medio_ne = pld_mtd_por_sub.get("NE", float(pld_medio_mes))
+
+        # MW medios equivalente (pro hint dos sliders no JS)
+        n_horas_mes = days_total_mes * 24
+
+        forecast_data = dict(
+            vazio=False,
+            cur_month=cur_first.strftime("%Y-%m"),
+            cur_month_label=cur_first.strftime("%B/%Y"),
+            days_total=days_total_mes,
+            days_elapsed=days_elapsed,
+            days_remaining=days_remaining,
+            n_horas_mes=n_horas_mes,
+            mwh_realized=round(mwh_realized, 1),
+            daily_avg=round(daily_avg, 1),
+            mwh_projected_remaining=round(mwh_projected_remaining, 1),
+            mwh_total_forecast=round(mwh_total_forecast, 1),
+            pld_mtd_por_sub=pld_mtd_por_sub,
+            pld_efetivo_mauriti=round(pld_efetivo_mauriti, 2),
+            pld_medio_ne=round(pld_medio_ne, 2),
+            today_str=today.strftime("%Y-%m-%d"),
+        )
+        print(f"\n[*] Monthly forecast: G_realizada={mwh_realized:,.0f} MWh "
+              f"({days_elapsed}/{days_total_mes} dias) "
+              f"-> G_projetada={mwh_total_forecast:,.0f} MWh")
+        print(f"    PLD MTD por sub: {pld_mtd_por_sub}, "
+              f"PLD_eff Mauriti: {pld_efetivo_mauriti:.0f} R$/MWh")
+
+        # ===== Persistencia historica do forecast =====
+        # Salva snapshot do dia em forecast_history.json (append). Janela
+        # de 60 dias - suficiente pra comparar com ontem/semana/mes anterior.
+        hist_path = Path(cfg["output_html"]).parent / "forecast_history.json"
+        hist_path.parent.mkdir(parents=True, exist_ok=True)
+        history_list = []
+        if hist_path.exists():
+            try:
+                with open(hist_path, "r", encoding="utf-8") as f:
+                    history_list = json.load(f)
+            except Exception:
+                history_list = []
+        # Remove qualquer snapshot anterior do MESMO dia (evita duplicacao)
+        history_list = [h for h in history_list
+                          if h.get("today_str") != forecast_data["today_str"]]
+        # Adiciona snapshot de hoje (apenas campos relevantes pra comparacao)
+        history_list.append({
+            "today_str": forecast_data["today_str"],
+            "cur_month": forecast_data["cur_month"],
+            "mwh_realized": forecast_data["mwh_realized"],
+            "mwh_total_forecast": forecast_data["mwh_total_forecast"],
+            "daily_avg": forecast_data["daily_avg"],
+            "pld_efetivo_mauriti": forecast_data["pld_efetivo_mauriti"],
+            "pld_mtd_por_sub": forecast_data["pld_mtd_por_sub"],
+        })
+        # Mantem ultimos 60 dias
+        history_list = sorted(history_list,
+                                key=lambda h: h["today_str"])[-60:]
+        with open(hist_path, "w", encoding="utf-8") as f:
+            json.dump(history_list, f, ensure_ascii=False, indent=2)
+        print(f"    forecast_history.json: {len(history_list)} snapshots "
+              f"({history_list[0]['today_str']} a {history_list[-1]['today_str']})")
+        # Snapshot de ontem (se existir) pra exibir card "vs yesterday"
+        yesterday_str = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        snap_yesterday = next((h for h in history_list
+                                  if h["today_str"] == yesterday_str), None)
+        forecast_data["yesterday"] = snap_yesterday  # pode ser None
+
     # ========== REN 1.030 ==========
     print("\n[*] Identificando eventos elegiveis REN 1.030/2022...")
     eventos = eventos_elegiveis_ren1030(mauriti.df)
@@ -5739,6 +6137,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         mod_summary=mod_summary,
         mod_tabela_dias=mod_tabela_dias,
         mod_mensal_json=json.dumps(mod_mensal_data, default=str),
+        forecast_data=forecast_data,
+        forecast_json=json.dumps(forecast_data, default=str),
         bench_kpis_json=json.dumps(bench_kpis_data, default=str),
         trend=trend,
         met_ren=met_ren,
