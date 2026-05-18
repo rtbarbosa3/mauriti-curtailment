@@ -564,7 +564,8 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
     return df
 
 
-def _baixar_pld_dados_abertos(year: int, cfg: dict) -> Path | None:
+def _baixar_pld_dados_abertos(year: int, cfg: dict,
+                                 session: requests.Session | None = None) -> Path | None:
     """Tenta baixar PLD do portal Dados Abertos CCEE via API CKAN.
     Retorna o caminho do arquivo baixado se sucesso, None se falha.
 
@@ -574,15 +575,36 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict) -> Path | None:
     3. Baixa o CSV do url do resource
     4. Salva em pld_data/pld_horario_<year>.csv (sobrescrevendo se ja existe)
 
+    IMPORTANTE: usa sessao CCEE com headers de browser (Mozilla User-Agent,
+    Referer, cookies obtidos via warm-up). Sem isso o CKAN retorna 403
+    quando chamado de IPs do Azure/GitHub Actions.
+
     Vantagem da API CKAN: as URLs dos resources sao UUIDs estaveis. Se
     a CCEE rotacionar o UUID, a API atualiza e o script continua funcionando.
     """
+    # Se nao recebeu sessao, cria uma nova (warmed-up com cookies CCEE)
+    if session is None:
+        session = _ccee_session()
+
     api_url = ("https://dadosabertos.ccee.org.br/api/3/action/"
                "package_show?id=pld_horario")
     try:
-        r = requests.get(api_url, timeout=cfg["request_timeout"])
+        # API CKAN espera Accept JSON, complementa a sessao
+        api_headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://dadosabertos.ccee.org.br/dataset/pld_horario",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        r = session.get(api_url, timeout=cfg["request_timeout"],
+                          headers=api_headers)
         if r.status_code != 200:
-            print(f"  [!] API CKAN retornou {r.status_code} para {year}")
+            print(f"  [!] API CKAN retornou {r.status_code} para {year} "
+                  f"(URL: {api_url})")
+            # Debug: mostra primeiros 200 chars da resposta pra detectar
+            # se eh erro de Cloudflare/WAF (HTML), rate limit, etc.
+            preview = r.text[:200].replace('\n', ' ').strip()
+            if preview:
+                print(f"  [!] Resposta: {preview}")
             return None
         data = r.json()
         resources = data.get("result", {}).get("resources", [])
@@ -593,11 +615,18 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict) -> Path | None:
                 csv_url = res.get("url")
                 if not csv_url:
                     continue
-                # Baixa
-                csv_resp = requests.get(csv_url,
-                                          timeout=cfg["request_timeout"])
+                # Baixa o CSV usando a MESMA sessao (cookies validos)
+                csv_headers = {
+                    "Accept": "text/csv, application/csv, text/plain, */*",
+                    "Referer": "https://dadosabertos.ccee.org.br/dataset/pld_horario",
+                }
+                csv_resp = session.get(csv_url,
+                                          timeout=cfg["request_timeout"],
+                                          headers=csv_headers,
+                                          allow_redirects=True)
                 if csv_resp.status_code != 200:
-                    print(f"  [!] Download {target} HTTP {csv_resp.status_code}")
+                    print(f"  [!] Download {target} HTTP {csv_resp.status_code} "
+                          f"(URL: {csv_url})")
                     continue
                 content = csv_resp.content
                 if len(content) < 1000:
@@ -612,7 +641,9 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict) -> Path | None:
                 print(f"  [OK] PLD {year} baixado de Dados Abertos CCEE "
                       f"({len(content)/1024:.0f} KB) -> {dest}")
                 return dest
-        print(f"  [!] Resource 'pld_horario_{year}' nao encontrado na API")
+        print(f"  [!] Resource 'pld_horario_{year}' nao encontrado na API "
+              f"(resources disponiveis: "
+              f"{[r.get('name') for r in resources[:5]]}...)")
         return None
     except (requests.RequestException, ValueError, KeyError) as e:
         print(f"  [!] Erro baixando PLD {year} via Dados Abertos: "
@@ -634,6 +665,10 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
     # Esse portal foi lancado em julho/2025 e publica diariamente. Substitui
     # o site antigo da CCEE (que era bloqueado por Akamai em IPs de cloud).
     print(f"       Tentando baixar de Dados Abertos CCEE para {anos_pendentes}...")
+    # Cria UMA sessao CCEE warmed-up (cookies + headers Mozilla) e reaproveita
+    # entre as chamadas dos varios anos. Sem isso o IP do GitHub Actions
+    # (Azure) recebe 403 do CKAN.
+    ccee_sess = _ccee_session()
     for ano in list(anos_pendentes):
         # Para ano corrente, sempre re-baixa (dados sao atualizados diariamente)
         # Para anos passados, so baixa se nao existe arquivo manual
@@ -642,7 +677,7 @@ def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
         eh_ano_atual = (ano == today.year)
         if ja_existe and not eh_ano_atual:
             continue  # ano passado ja tem arquivo, nao precisa rebaixar
-        baixado = _baixar_pld_dados_abertos(ano, cfg)
+        baixado = _baixar_pld_dados_abertos(ano, cfg, session=ccee_sess)
         if baixado:
             try:
                 frames.append(_read_csv_robust(baixado))
