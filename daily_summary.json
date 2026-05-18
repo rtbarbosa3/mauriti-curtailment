@@ -20,7 +20,7 @@
     "worst_hour": {
       "hour": 10,
       "mwh": 107.0,
-      "pld": 276.88
+      "pld": 57.31
     }
   },
   "trend_30_90_365": {
@@ -32,14 +32,14 @@
   },
   "month_to_date": {
     "vazio": false,
-    "n_dias": 11,
-    "mwh_total": 16325.7568359375,
-    "receita_real": 1234154.1288663554,
-    "receita_flat": 2045207.3794297026,
-    "desconto_rs": -811053.2505633472,
-    "desconto_pct": -39.65628418520111,
-    "pld_medio": 114.60382575757576,
-    "pld_efetivo": 75.59552315208084,
+    "n_dias": 17,
+    "mwh_total": 27189.08203125,
+    "receita_real": 2224658.901482872,
+    "receita_flat": 3930085.8863732144,
+    "desconto_rs": -1705426.9848903422,
+    "desconto_pct": -43.39414033681983,
+    "pld_medio": 136.38710784313727,
+    "pld_efetivo": 81.82177312665215,
     "pior_dia": "10",
     "pior_pct": -63.888917772586666
   },
@@ -50,12 +50,12 @@
     "delta_pp": -4.43
   },
   "vs_ne_fleet_modulation": {
-    "mauriti_disc_pct": -26.28,
-    "ne_fleet_disc_pct": -25.55
+    "mauriti_disc_pct": -26.66,
+    "ne_fleet_disc_pct": -25.79
   },
   "totals_period": {
     "mwh_curtailed": 73256.0,
-    "lost_revenue_rs": 8584185.0,
+    "lost_revenue_rs": 8057958.0,
     "cf_pct": 22.83,
     "ren_eligible_events": 1375,
     "ren_eligible_mwh": 14647.0
