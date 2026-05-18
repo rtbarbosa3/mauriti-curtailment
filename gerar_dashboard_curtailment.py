@@ -42,6 +42,15 @@ import requests
 from jinja2 import Template
 from tqdm import tqdm
 
+# Tenta importar curl_cffi para bypass de TLS fingerprinting (Akamai).
+# Se nao disponivel (ambiente local sem instalar), cai pro requests padrao.
+try:
+    from curl_cffi import requests as cffi_requests
+    _CFFI_OK = True
+except ImportError:
+    cffi_requests = None
+    _CFFI_OK = False
+
 import plotly.graph_objects as go
 import plotly.io as pio
 
@@ -172,38 +181,63 @@ _BROWSER_HEADERS = {
 }
 
 
-def _ccee_session() -> requests.Session:
-    """Cria uma sessao com cookies obtidos visitando a pagina do dataset CCEE,
-    headers de navegador e Referer. Resolve bloqueio 403 que acontece quando
-    se faz request direto na URL pda-download.ccee.org.br."""
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"),
-        "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,*/*;q=0.8"),
-        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-    })
+def _ccee_session():
+    """Cria uma sessao com cookies obtidos visitando a pagina do dataset CCEE.
+
+    ESTRATEGIA DE BYPASS DE AKAMAI/WAF:
+    -----------------------------------
+    A CCEE usa proteçao Akamai que detecta IPs de cloud (Azure/AWS/GCP) e
+    bloqueia requests com TLS fingerprint de Python `requests` (chave JA3).
+
+    Solucao: se curl_cffi estiver disponivel, usa ela com impersonate=chrome131
+    que faz o TLS handshake EXATAMENTE como um Chrome real (cipher suites,
+    ordem, extensions, HTTP/2 frames). Isso ja eh suficiente pra bypassar
+    muitas protecoes Akamai mesmo de IPs de cloud.
+
+    Se curl_cffi nao estiver instalado (ex: rodando local sem `pip install`),
+    cai pro requests padrao com headers de browser. Funciona se IP for
+    residencial.
+    """
+    if _CFFI_OK and cffi_requests is not None:
+        # curl_cffi com TLS fingerprint do Chrome 131 real
+        s = cffi_requests.Session(impersonate="chrome131")
+        print("  [INFO] CCEE session: usando curl_cffi (Chrome 131 TLS fingerprint)")
+    else:
+        # Fallback: requests padrao com headers de browser
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+                        "image/avif,image/webp,*/*;q=0.8"),
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+        })
+        print("  [INFO] CCEE session: usando requests padrao "
+                "(curl_cffi nao disponivel)")
+
     # Warm-up: visita a pagina do dataset pra coletar cookies
     try:
-        s.get("https://dadosabertos.ccee.org.br/dataset/pld_horario",
-                timeout=30, allow_redirects=True)
-    except requests.RequestException as e:
-        print(f"  [!] Warm-up CCEE falhou: {e} - tentando sem cookies")
+        r = s.get("https://dadosabertos.ccee.org.br/dataset/pld_horario",
+                    timeout=30, allow_redirects=True)
+        print(f"  [INFO] Warm-up CCEE: HTTP {r.status_code} "
+              f"({len(r.content)} bytes)")
+    except Exception as e:
+        print(f"  [!] Warm-up CCEE falhou: {e.__class__.__name__}: {e}")
     return s
 
 
-def _download_ccee(session: requests.Session, url: str, dest: Path,
+def _download_ccee(session, url: str, dest: Path,
                     timeout: int, retries: int, force: bool = False) -> bool:
-    """Download via sessao CCEE com Referer ajustado pro dataset."""
+    """Download via sessao CCEE com Referer ajustado pro dataset.
+    Funciona com requests.Session ou curl_cffi.requests.Session."""
     if dest.exists() and dest.stat().st_size > 0 and not force:
         return True
     if force and dest.exists():
@@ -211,24 +245,27 @@ def _download_ccee(session: requests.Session, url: str, dest: Path,
     headers = {"Referer": "https://dadosabertos.ccee.org.br/dataset/pld_horario"}
     for attempt in range(1, retries + 1):
         try:
-            r = session.get(url, timeout=timeout, stream=True, headers=headers,
+            # curl_cffi nao suporta stream=True da mesma forma; baixa tudo em
+            # memoria. Arquivos PLD sao pequenos (~500KB), entao OK.
+            r = session.get(url, timeout=timeout, headers=headers,
                               allow_redirects=True)
             if r.status_code == 404:
                 return False
-            r.raise_for_status()
+            if r.status_code != 200:
+                preview = r.text[:200].replace('\n', ' ')
+                print(f"  [!] CCEE HTTP {r.status_code}: {preview[:150]}")
+                if attempt == retries:
+                    return False
+                continue
+            content = r.content
             tmp = dest.with_suffix(dest.suffix + ".part")
-            total = int(r.headers.get("content-length", 0))
-            with tmp.open("wb") as f, tqdm(
-                total=total, unit="B", unit_scale=True, unit_divisor=1024,
-                desc=f"  {dest.name}", leave=False, ncols=80,
-            ) as bar:
-                for chunk in r.iter_content(chunk_size=64 * 1024):
-                    if chunk:
-                        f.write(chunk); bar.update(len(chunk))
+            with tmp.open("wb") as f:
+                f.write(content)
             tmp.replace(dest); return True
-        except requests.RequestException as e:
+        except Exception as e:
             if attempt == retries:
-                print(f"  [!] Falha download CCEE {url}: {e}")
+                print(f"  [!] Falha download CCEE {url}: "
+                      f"{e.__class__.__name__}: {e}")
                 return False
     return False
 
@@ -565,7 +602,7 @@ def carregar_irradiancia_nasa(cfg: dict, dt_ini: date, dt_fim: date) -> pd.DataF
 
 
 def _baixar_pld_dados_abertos(year: int, cfg: dict,
-                                 session: requests.Session | None = None) -> Path | None:
+                                 session=None) -> Path | None:
     """Tenta baixar PLD do portal Dados Abertos CCEE via API CKAN.
     Retorna o caminho do arquivo baixado se sucesso, None se falha.
 
@@ -575,14 +612,14 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict,
     3. Baixa o CSV do url do resource
     4. Salva em pld_data/pld_horario_<year>.csv (sobrescrevendo se ja existe)
 
-    IMPORTANTE: usa sessao CCEE com headers de browser (Mozilla User-Agent,
-    Referer, cookies obtidos via warm-up). Sem isso o CKAN retorna 403
-    quando chamado de IPs do Azure/GitHub Actions.
+    IMPORTANTE: usa sessao CCEE com TLS fingerprint de Chrome via curl_cffi
+    (se disponivel). Sem isso, o Akamai detecta IP de cloud + python-requests
+    TLS fingerprint e retorna 403 "Bloqueio Manutençao".
 
     Vantagem da API CKAN: as URLs dos resources sao UUIDs estaveis. Se
     a CCEE rotacionar o UUID, a API atualiza e o script continua funcionando.
     """
-    # Se nao recebeu sessao, cria uma nova (warmed-up com cookies CCEE)
+    # Se nao recebeu sessao, cria uma nova (com curl_cffi se disponivel)
     if session is None:
         session = _ccee_session()
 
@@ -645,7 +682,9 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict,
               f"(resources disponiveis: "
               f"{[r.get('name') for r in resources[:5]]}...)")
         return None
-    except (requests.RequestException, ValueError, KeyError) as e:
+    except Exception as e:
+        # Captura tudo: requests.RequestException, curl_cffi.requests.errors.*,
+        # JSONDecodeError, KeyError, etc.
         print(f"  [!] Erro baixando PLD {year} via Dados Abertos: "
               f"{e.__class__.__name__}: {e}")
         return None
