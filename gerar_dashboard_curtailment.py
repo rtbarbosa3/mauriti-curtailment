@@ -1216,8 +1216,233 @@ def perfil_horario(geracao_horaria: pd.DataFrame,
 
 
 # =============================================================================
-#  REN 1.030/2022 - eventos elegiveis
+#  ONDA 2A: Analises adicionais (YoY, ITM/OTM, breakdown REL/CNF/ENE/PAR)
 # =============================================================================
+
+def calcular_yoy_modulacao(diario_m: pd.DataFrame, today: date) -> dict:
+    """Compara desconto de modulacao do mes corrente com o mesmo mes do ano
+    anterior. Retorna dict com: cur_pct, prior_pct, delta_pp, label_cur,
+    label_prior, status (better/worse/equal), vazio.
+
+    'Vazio' se nao tem dado nem do mes corrente nem do ano anterior.
+    """
+    if diario_m.empty:
+        return {"vazio": True}
+    df = diario_m.copy()
+    df["dia"] = pd.to_datetime(df["dia"])
+    df["ano"] = df["dia"].dt.year
+    df["mes"] = df["dia"].dt.month
+
+    # Mes corrente (ainda parcial - so dias decorridos)
+    cur_mes = today.month
+    cur_ano = today.year
+    prior_ano = cur_ano - 1
+
+    # Filtra mes corrente parcial
+    cur_df = df[(df["ano"] == cur_ano) & (df["mes"] == cur_mes)]
+    # Filtra mesmo mes do ano passado (so ate o mesmo dia, pra comparar
+    # mesmas N dias decorridos -- mais justo)
+    cur_dia_max = today.day
+    prior_df = df[(df["ano"] == prior_ano) & (df["mes"] == cur_mes) &
+                    (df["dia"].dt.day <= cur_dia_max)]
+
+    def _desc_pct(d):
+        if d.empty:
+            return None
+        rr = d["receita_real"].sum()
+        rf = d["receita_flat"].sum()
+        return float(100 * (rr - rf) / rf) if rf > 1e-9 else None
+
+    cur_pct = _desc_pct(cur_df)
+    prior_pct = _desc_pct(prior_df)
+
+    if cur_pct is None and prior_pct is None:
+        return {"vazio": True}
+
+    # Label de mes em portugues (consistente com resto do dashboard)
+    meses = ["jan", "fev", "mar", "abr", "mai", "jun",
+              "jul", "ago", "set", "out", "nov", "dez"]
+    label_cur = f"{meses[cur_mes-1]}/{str(cur_ano)[2:]}"
+    label_prior = f"{meses[cur_mes-1]}/{str(prior_ano)[2:]}"
+
+    delta_pp = None
+    status = "no_data"
+    if cur_pct is not None and prior_pct is not None:
+        delta_pp = cur_pct - prior_pct
+        # Desconto eh negativo (perda). Delta NEGATIVO = pior (mais desconto)
+        if abs(delta_pp) < 0.5:
+            status = "equal"
+        elif delta_pp < 0:
+            status = "worse"
+        else:
+            status = "better"
+
+    return dict(
+        vazio=False,
+        cur_pct=cur_pct, prior_pct=prior_pct,
+        delta_pp=delta_pp, status=status,
+        label_cur=label_cur, label_prior=label_prior,
+        cur_n_dias=int(len(cur_df)), prior_n_dias=int(len(prior_df)),
+    )
+
+
+def calcular_in_out_money(geracao_horaria: pd.DataFrame,
+                              pld: pd.DataFrame, cur_first: date) -> dict:
+    """Analisa quantas horas Mauriti gerou em PLD acima da media mensal
+    (in-the-money / hora valiosa) vs abaixo (out-the-money / hora barata).
+
+    Util pra entender se solar pega ou nao as horas caras do mes. Ajuda
+    a contextualizar o desconto de modulacao em termos hora-a-hora.
+    """
+    if geracao_horaria.empty or pld.empty:
+        return {"vazio": True}
+
+    # Filtra mes corrente
+    cur_first_ts = pd.Timestamp(cur_first)
+    df = geracao_horaria.merge(pld, on="hora", how="left").dropna(subset=["pld"])
+    df = df[df["hora"] >= cur_first_ts]
+    if df.empty:
+        return {"vazio": True}
+
+    pld_medio_mes = float(df["pld"].mean())
+    if pld_medio_mes <= 0:
+        return {"vazio": True}
+
+    df["receita"] = df["mwh"] * df["pld"]
+    # Filtra so horas com geracao (Mauriti so gera de dia)
+    df_gen = df[df["mwh"] > 0]
+    if df_gen.empty:
+        return {"vazio": True}
+
+    itm = df_gen[df_gen["pld"] > pld_medio_mes]
+    otm = df_gen[df_gen["pld"] <= pld_medio_mes]
+
+    total_horas_gen = int(len(df_gen))
+    total_mwh = float(df_gen["mwh"].sum())
+    total_receita = float(df_gen["receita"].sum())
+
+    def _stats(group, label):
+        n = int(len(group))
+        mwh = float(group["mwh"].sum())
+        receita = float(group["receita"].sum())
+        return dict(
+            label=label, n_horas=n, mwh=mwh, receita=receita,
+            pct_horas=100*n/total_horas_gen if total_horas_gen > 0 else 0,
+            pct_mwh=100*mwh/total_mwh if total_mwh > 0 else 0,
+            pct_receita=100*receita/total_receita if total_receita > 0 else 0,
+            pld_medio_no_grupo=float(group["pld"].mean()) if n > 0 else 0,
+        )
+
+    return dict(
+        vazio=False,
+        pld_referencia=pld_medio_mes,
+        total_horas_gen=total_horas_gen,
+        total_mwh=total_mwh,
+        total_receita=total_receita,
+        itm=_stats(itm, "In-the-money (PLD > média)"),
+        otm=_stats(otm, "Out-of-the-money (PLD ≤ média)"),
+    )
+
+
+def calcular_curtailment_por_razao(df_mauriti: pd.DataFrame,
+                                       pld: pd.DataFrame) -> pd.DataFrame:
+    """Agrega curtailment por codigo de razao do ONS (REL/CNF/ENE/PAR),
+    calcula MWh e perda financeira (curt × PLD) de cada categoria.
+
+    Retorna DataFrame com colunas: razao, label, ressarcivel,
+    mwh_total, n_horas, perd_rs, pct_mwh, pct_rs.
+    """
+    if df_mauriti.empty or "cod_razaorestricao" not in df_mauriti.columns:
+        return pd.DataFrame()
+
+    df = df_mauriti.copy()
+    # Mantem so cortes reais (curtailment > 0)
+    df = df[df["curtailment_mwh"] > 0]
+    if df.empty:
+        return pd.DataFrame()
+
+    # Cruza com PLD para perda financeira
+    if not pld.empty:
+        df = df.merge(pld[["hora", "pld"]], left_on="din_instante",
+                          right_on="hora", how="left")
+        df["perd_rs"] = df["curtailment_mwh"] * df["pld"].fillna(0)
+    else:
+        df["perd_rs"] = 0.0
+
+    # Agrega
+    agg = df.groupby("cod_razaorestricao").agg(
+        mwh_total=("curtailment_mwh", "sum"),
+        n_eventos=("curtailment_mwh", "count"),
+        perd_rs=("perd_rs", "sum"),
+    ).reset_index()
+    agg = agg.rename(columns={"cod_razaorestricao": "razao"})
+
+    # Adiciona labels e flag de ressarcivel
+    agg["label"] = agg["razao"].map(RAZAO_LABEL).fillna("Outros")
+    agg["ressarcivel"] = agg["razao"].map(RAZAO_RESSARCIVEL).fillna(False)
+
+    # Percentuais
+    total_mwh = agg["mwh_total"].sum()
+    total_rs = agg["perd_rs"].sum()
+    agg["pct_mwh"] = 100 * agg["mwh_total"] / total_mwh if total_mwh > 0 else 0
+    agg["pct_rs"] = 100 * agg["perd_rs"] / total_rs if total_rs > 0 else 0
+
+    # Ordena por MWh decrescente
+    agg = agg.sort_values("mwh_total", ascending=False).reset_index(drop=True)
+    return agg
+
+
+def g_donut_curtailment_razao(df_razao: pd.DataFrame) -> go.Figure:
+    """Gera donut chart com breakdown REL/CNF/ENE/PAR (% MWh).
+    Cores: REL/CNF = ressarciveis (laranja escuro), ENE/PAR = nao (cinza).
+    """
+    if df_razao.empty:
+        return go.Figure()
+
+    # Cores por categoria
+    cores = {
+        "REL": "#a8442f",  # ressarcivel - laranja escuro
+        "CNF": "#d57255",  # ressarcivel - laranja claro
+        "ENE": "#857d72",  # nao-ressarcivel - cinza
+        "PAR": "#c8c0ad",  # nao-ressarcivel - bege
+    }
+    colors = [cores.get(r, "#999999") for r in df_razao["razao"]]
+
+    # Labels descritivas
+    labels = [f"{r} ({l})" for r, l in
+                  zip(df_razao["razao"], df_razao["label"])]
+
+    fig = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=df_razao["mwh_total"],
+        hole=0.55,
+        marker=dict(colors=colors, line=dict(color="#fafaf6", width=2)),
+        textposition="outside",
+        textinfo="label+percent",
+        textfont=dict(family="IBM Plex Sans", size=11),
+        hovertemplate="<b>%{label}</b><br>" +
+                       "%{value:,.0f} MWh (%{percent})<br>" +
+                       "<extra></extra>",
+        sort=False,
+    )])
+
+    total_mwh = df_razao["mwh_total"].sum()
+    fig.add_annotation(
+        text=f"<b>{total_mwh:,.0f}</b><br>"
+              f"<span style='font-size:10px;color:#857d72'>MWh total</span>",
+        x=0.5, y=0.5, showarrow=False,
+        font=dict(family="IBM Plex Sans", size=18, color="#1a1715"),
+    )
+    fig.update_layout(
+        margin=dict(t=20, b=20, l=20, r=20),
+        height=340,
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
 
 def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
     """Filtra cortes do Mauriti que sao elegiveis a ressarcimento sob a
@@ -2633,6 +2858,90 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   a{color:black !important;text-decoration:none}
 }
 
+/* ===== ONDA 2A: YoY card ===== */
+.yoy-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.yoy-grid{display:grid;grid-template-columns:1fr auto 1fr;gap:32px;
+  align-items:center;justify-items:center}
+.yoy-cell{text-align:center;display:flex;flex-direction:column;gap:6px;align-items:center}
+.yoy-label{font-size:10px;color:var(--muted);letter-spacing:0.14em;
+  text-transform:uppercase;font-weight:600}
+.yoy-value{font-family:'Fraunces',Georgia,serif;font-size:38px;
+  font-weight:500;color:var(--ink);line-height:1.1}
+.yoy-value.neg{color:var(--accent)}
+.yoy-na{font-size:18px;color:var(--muted);font-style:italic}
+.yoy-note{font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace}
+.yoy-arrow .arrow{font-size:42px;line-height:1}
+.yoy-arrow .arrow.worse{color:var(--accent-today)}
+.yoy-arrow .arrow.better{color:var(--ok)}
+.yoy-arrow .arrow.equal{color:var(--muted)}
+.yoy-delta{font-size:13px;font-family:'IBM Plex Mono',monospace;
+  color:var(--ink);margin-top:4px;font-weight:600}
+.yoy-prose{margin-top:18px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;border-top:1px solid var(--border);padding-top:14px;text-align:center}
+.yoy-tag-worse{background:#fce4e0;color:#a8442f;border-color:#f0c5be}
+.yoy-tag-better{background:#dff5e8;color:#2d5a3d;border-color:#bfe5d0}
+.yoy-tag-equal{background:var(--bg-alt);color:var(--muted);border-color:var(--border)}
+@media (max-width:720px){.yoy-grid{grid-template-columns:1fr;gap:16px}}
+
+/* ===== ONDA 2A: ITM/OTM card ===== */
+.itm-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.itm-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px}
+.itm-cell{padding:18px;background:var(--bg-alt);border-radius:3px;
+  border-left:3px solid var(--rule)}
+.itm-cell.itm-ref{border-left-color:var(--neutral);text-align:center}
+.itm-cell.itm-pos{border-left-color:var(--ok)}
+.itm-cell.itm-neg{border-left-color:var(--accent)}
+.itm-tiny{font-size:10px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;line-height:1.4}
+.itm-ref-val{font-family:'Fraunces',Georgia,serif;font-size:30px;
+  color:var(--ink);font-weight:500;margin:6px 0}
+.itm-ref-val .unit{font-size:12px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+.itm-label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  margin-bottom:10px;font-size:11px;color:var(--ink);
+  letter-spacing:0.1em;text-transform:uppercase;font-weight:600}
+.itm-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.itm-dot.pos{background:var(--ok)}
+.itm-dot.neg{background:var(--accent)}
+.itm-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px}
+.itm-num{font-family:'Fraunces',Georgia,serif;font-size:28px;
+  color:var(--ink);font-weight:500;line-height:1}
+.itm-num .unit{font-size:12px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:2px}
+.itm-prose{margin-top:18px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;border-top:1px solid var(--border);padding-top:14px}
+@media (max-width:720px){.itm-grid{grid-template-columns:1fr;gap:12px}}
+
+/* ===== ONDA 2A: Razao breakdown card ===== */
+.razao-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.razao-grid{display:grid;grid-template-columns:340px 1fr;gap:28px;
+  align-items:start}
+.razao-chart{display:flex;align-items:center;justify-content:center}
+.razao-stats{width:100%;border-collapse:collapse;font-size:13px}
+.razao-stats th{font-size:10px;color:var(--muted);letter-spacing:0.12em;
+  text-transform:uppercase;font-weight:600;text-align:left;
+  padding:8px 8px;border-bottom:1px solid var(--border2)}
+.razao-stats th.num{text-align:right}
+.razao-stats td{padding:10px 8px;border-bottom:1px solid var(--border);
+  color:var(--ink-2)}
+.razao-stats td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.razao-stats tfoot td{border-bottom:none;border-top:2px solid var(--border2);
+  padding-top:12px;font-weight:600;color:var(--ink)}
+.razao-row.razao-rel{background:linear-gradient(to right, rgba(168,68,47,0.04), transparent)}
+.razao-row.razao-cnf{background:linear-gradient(to right, rgba(213,114,85,0.04), transparent)}
+.razao-tag{display:inline-block;padding:2px 8px;border-radius:10px;
+  font-size:10px;font-weight:600;letter-spacing:0.06em}
+.razao-tag.elig{background:#dff5e8;color:#2d5a3d}
+.razao-tag.noelig{background:var(--bg-alt);color:var(--muted)}
+.razao-prose{margin-top:14px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;padding-top:10px;border-top:1px solid var(--border)}
+@media (max-width:840px){
+  .razao-grid{grid-template-columns:1fr}
+}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -3531,6 +3840,90 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </p>
     <div class="chart"><div id="heatmap_dow" style="height:460px"></div></div>
 
+    <!-- ========================================================= -->
+    <!-- ONDA 2A.3: Breakdown REL/CNF/ENE/PAR                       -->
+    <!-- ========================================================= -->
+    {% if razao_breakdown %}
+    <div class="section-head">
+      <span class="num">IX.</span>
+      <h3 data-i18n="razao_title">Curtailment by reason · ONS classification</h3>
+      <span class="tag" data-i18n="razao_tag">REN 1.030 ELIGIBILITY</span>
+    </div>
+    <p class="section-desc" data-i18n="razao_desc">
+      Each curtailment hour is classified by ONS with a reason code. REL
+      (external unavailability) and CNF (reliability) are eligible for
+      compensation under REN 1.030/2022; ENE (energy/oversupply) and PAR
+      (access opinion) are not. Knowing the mix is critical for ressarcement
+      strategy.
+    </p>
+
+    <div class="razao-card">
+      <div class="razao-grid">
+        <div class="razao-chart">
+          <div class="chart"><div id="razao_donut" style="height:340px"></div></div>
+        </div>
+        <div class="razao-table">
+          <table class="razao-stats">
+            <thead>
+              <tr>
+                <th data-i18n="razao_th_code">Code</th>
+                <th data-i18n="razao_th_meaning">Meaning</th>
+                <th class="num" data-i18n="razao_th_mwh">MWh</th>
+                <th class="num" data-i18n="razao_th_loss">Loss (R$)</th>
+                <th class="num" data-i18n="razao_th_pct">% MWh</th>
+                <th data-i18n="razao_th_elig">Eligible</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in razao_breakdown %}
+              <tr class="razao-row razao-{{ r.razao|lower }}">
+                <td><strong>{{ r.razao }}</strong></td>
+                <td>{{ r.label }}</td>
+                <td class="num">{{ "{:,.0f}".format(r.mwh_total).replace(",", " ") }}</td>
+                <td class="num">R$ {{ "%.1f"|format(r.perd_rs/1e6) }}M</td>
+                <td class="num">{{ "%.1f"|format(r.pct_mwh) }}%</td>
+                <td>
+                  {% if r.ressarcivel %}
+                    <span class="razao-tag elig" data-i18n="razao_yes">Yes</span>
+                  {% else %}
+                    <span class="razao-tag noelig" data-i18n="razao_no">No</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr class="razao-foot">
+                {% set tot_mwh = razao_breakdown | sum(attribute='mwh_total') %}
+                {% set tot_rs  = razao_breakdown | sum(attribute='perd_rs') %}
+                {% set ress_mwh = razao_breakdown | selectattr('ressarcivel') | sum(attribute='mwh_total') %}
+                {% set ress_pct = (100 * ress_mwh / tot_mwh) if tot_mwh > 0 else 0 %}
+                <td colspan="2"><strong data-i18n="razao_total">Total</strong></td>
+                <td class="num"><strong>{{ "{:,.0f}".format(tot_mwh).replace(",", " ") }}</strong></td>
+                <td class="num"><strong>R$ {{ "%.1f"|format(tot_rs/1e6) }}M</strong></td>
+                <td class="num"></td>
+                <td>
+                  <span class="razao-tag elig">{{ "%.0f"|format(ress_pct) }}%</span>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+          <p class="razao-prose">
+            {% if ress_pct > 70 %}
+              <strong data-i18n="razao_prose_high">{{ "%.0f"|format(ress_pct) }}% of curtailed MWh is eligible for compensation</strong>
+              <span data-i18n="razao_prose_high_p"> under REN 1.030/2022. Strong case for ressarcement claims.</span>
+            {% elif ress_pct > 40 %}
+              <strong>{{ "%.0f"|format(ress_pct) }}%</strong>
+              <span data-i18n="razao_prose_mid">of curtailed MWh is potentially eligible for ressarcement. Mixed profile — review case by case.</span>
+            {% else %}
+              <span data-i18n="razao_prose_low">Most curtailment is ENE/PAR (not eligible for ressarcement). Curtailment driven mainly by oversupply, not by external network failures.</span>
+            {% endif %}
+          </p>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
   </div><!-- /tab curt -->
 
   <!-- ============================================================ -->
@@ -3696,11 +4089,156 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <!-- ========================================================= -->
+    <!-- ONDA 2A: YoY Modulation comparison + In/Out-the-money    -->
+    <!-- ========================================================= -->
+    {% if yoy_modulation and not yoy_modulation.vazio %}
+    <div class="section-head">
+      <span class="num">IV.</span>
+      <h3 data-i18n="yoy_title">Year-over-year modulation</h3>
+      <span class="tag yoy-tag-{{ yoy_modulation.status }}" data-i18n="yoy_tag_{{ yoy_modulation.status }}">
+        {% if yoy_modulation.status == 'worse' %}WORSE{% elif yoy_modulation.status == 'better' %}BETTER{% else %}STABLE{% endif %}
+      </span>
+    </div>
+    <p class="section-desc" data-i18n="yoy_desc">
+      Compares the modulation discount of the current partial month against
+      the same partial month in the prior year. Apples-to-apples (same number
+      of elapsed days) to isolate seasonal vs. structural changes.
+    </p>
+
+    <div class="yoy-card">
+      <div class="yoy-grid">
+        <div class="yoy-cell">
+          <div class="yoy-label" data-i18n="yoy_current">Current ({{ yoy_modulation.label_cur }})</div>
+          <div class="yoy-value {% if yoy_modulation.cur_pct and yoy_modulation.cur_pct < 0 %}neg{% endif %}">
+            {% if yoy_modulation.cur_pct is not none %}
+              {{ "%.2f"|format(yoy_modulation.cur_pct) }}%
+            {% else %}
+              <span class="yoy-na">N/A</span>
+            {% endif %}
+          </div>
+          <div class="yoy-note">{{ yoy_modulation.cur_n_dias }} <span data-i18n="yoy_days">days</span></div>
+        </div>
+
+        <div class="yoy-cell yoy-arrow">
+          {% if yoy_modulation.delta_pp is not none %}
+            {% if yoy_modulation.status == 'worse' %}<span class="arrow worse">▼</span>
+            {% elif yoy_modulation.status == 'better' %}<span class="arrow better">▲</span>
+            {% else %}<span class="arrow equal">●</span>{% endif %}
+            <div class="yoy-delta">{{ "%+.2f"|format(yoy_modulation.delta_pp) }} pp</div>
+          {% else %}
+            <span class="arrow equal">●</span>
+          {% endif %}
+        </div>
+
+        <div class="yoy-cell">
+          <div class="yoy-label" data-i18n="yoy_prior">Prior year ({{ yoy_modulation.label_prior }})</div>
+          <div class="yoy-value {% if yoy_modulation.prior_pct and yoy_modulation.prior_pct < 0 %}neg{% endif %}">
+            {% if yoy_modulation.prior_pct is not none %}
+              {{ "%.2f"|format(yoy_modulation.prior_pct) }}%
+            {% else %}
+              <span class="yoy-na">N/A</span>
+            {% endif %}
+          </div>
+          <div class="yoy-note">{{ yoy_modulation.prior_n_dias }} <span data-i18n="yoy_days">days</span></div>
+        </div>
+      </div>
+
+      <p class="yoy-prose">
+        {% if yoy_modulation.cur_pct is not none and yoy_modulation.prior_pct is not none %}
+          {% if yoy_modulation.status == 'worse' %}
+            <span data-i18n="yoy_prose_worse">Mauriti's modulation discount worsened by</span>
+            <strong>{{ "%.2f"|format(yoy_modulation.delta_pp|abs) }} pp</strong>
+            <span data-i18n="yoy_prose_worse_p">vs. the same period in the prior year. Investigate if structural causes (more curtailment, peak-hour mix shift) or external (lower PLD spreads).</span>
+          {% elif yoy_modulation.status == 'better' %}
+            <span data-i18n="yoy_prose_better">Modulation improved by</span>
+            <strong>{{ "%.2f"|format(yoy_modulation.delta_pp) }} pp</strong>
+            <span data-i18n="yoy_prose_better_p">vs. the same period last year. Reflects more favorable PLD spreads or operational improvements.</span>
+          {% else %}
+            <span data-i18n="yoy_prose_equal">Modulation is essentially flat YoY, suggesting stable structural conditions.</span>
+          {% endif %}
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+
+    {% if itm_otm and not itm_otm.vazio %}
+    <div class="section-head">
+      <span class="num">V.</span>
+      <h3 data-i18n="itm_title">Hours in/out of the money</h3>
+      <span class="tag" data-i18n="itm_tag">SPOT EXPOSURE</span>
+    </div>
+    <p class="section-desc" data-i18n="itm_desc">
+      Of all the hours Mauriti generated this month, what fraction coincided
+      with PLD <em>above</em> the monthly mean (valuable hours, in-the-money)
+      vs <em>below</em> (cheap hours, out-of-the-money). Quantifies the
+      solar timing penalty in hour-by-hour terms.
+    </p>
+
+    <div class="itm-card">
+      <div class="itm-grid">
+        <div class="itm-cell itm-ref">
+          <div class="itm-tiny" data-i18n="itm_ref">Monthly PLD reference</div>
+          <div class="itm-ref-val">R$ {{ "%.0f"|format(itm_otm.pld_referencia) }}<span class="unit">/MWh</span></div>
+          <div class="itm-tiny" data-i18n="itm_total">Total generation hours: {{ itm_otm.total_horas_gen }}</div>
+        </div>
+        <div class="itm-cell itm-pos">
+          <div class="itm-label">
+            <span class="itm-dot pos"></span>
+            <span data-i18n="itm_in">In-the-money</span>
+            <span class="itm-tiny">(PLD &gt; mean)</span>
+          </div>
+          <div class="itm-grid-2">
+            <div>
+              <div class="itm-num">{{ itm_otm.itm.n_horas }}<span class="unit">h</span></div>
+              <div class="itm-tiny">{{ "%.0f"|format(itm_otm.itm.pct_horas) }}% <span data-i18n="itm_of_hours">of hours</span></div>
+            </div>
+            <div>
+              <div class="itm-num">{{ "%.0f"|format(itm_otm.itm.pct_mwh) }}<span class="unit">%</span></div>
+              <div class="itm-tiny" data-i18n="itm_of_mwh">of MWh captured</div>
+            </div>
+          </div>
+        </div>
+        <div class="itm-cell itm-neg">
+          <div class="itm-label">
+            <span class="itm-dot neg"></span>
+            <span data-i18n="itm_out">Out-of-the-money</span>
+            <span class="itm-tiny">(PLD &le; mean)</span>
+          </div>
+          <div class="itm-grid-2">
+            <div>
+              <div class="itm-num">{{ itm_otm.otm.n_horas }}<span class="unit">h</span></div>
+              <div class="itm-tiny">{{ "%.0f"|format(itm_otm.otm.pct_horas) }}% <span data-i18n="itm_of_hours">of hours</span></div>
+            </div>
+            <div>
+              <div class="itm-num">{{ "%.0f"|format(itm_otm.otm.pct_mwh) }}<span class="unit">%</span></div>
+              <div class="itm-tiny" data-i18n="itm_of_mwh">of MWh captured</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="itm-prose">
+        {% set itm_skew = itm_otm.otm.pct_mwh - itm_otm.otm.pct_horas %}
+        {% if itm_skew > 5 %}
+          <span data-i18n="itm_prose_negskew">Solar generation is disproportionately concentrated in low-PLD hours: Mauriti delivered</span>
+          <strong>{{ "%.0f"|format(itm_otm.otm.pct_mwh) }}%</strong>
+          <span data-i18n="itm_prose_negskew_b">of MWh in only</span>
+          <strong>{{ "%.0f"|format(itm_otm.otm.pct_horas) }}%</strong>
+          <span data-i18n="itm_prose_negskew_c">of hours when prices were below average. This is the structural cause of modulation discount.</span>
+        {% elif itm_skew < -5 %}
+          <span data-i18n="itm_prose_posskew">Mauriti is capturing more valuable hours than average — a favorable position.</span>
+        {% else %}
+          <span data-i18n="itm_prose_balanced">Generation is roughly balanced between valuable and cheap hours.</span>
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+
+    <!-- ========================================================= -->
     <!-- MONTHLY FORECAST (substitui o PPA What-If antigo)            -->
     <!-- Foco: projecao financeira do mes corrente (CCEE + Comercial) -->
     <!-- ========================================================= -->
     <div class="section-head">
-      <span class="num">IV.</span>
+      <span class="num">VI.</span>
       <h3 data-i18n="forecast_title">Monthly forecast</h3>
       <span class="tag" data-i18n="forecast_tag">INTERACTIVE</span>
     </div>
@@ -4813,7 +5351,52 @@ const I18N = {
     cred_tech: "Stack técnico",
     cred_version: "Versão",
     cred_released: "lançada em",
-    cred_changelog: "histórico de mudanças"
+    cred_changelog: "histórico de mudanças",
+    // ===== ONDA 2A =====
+    yoy_title: "Modulação ano a ano",
+    yoy_desc: "Compara o desconto de modulação do mês corrente (parcial) com o mesmo mês parcial do ano anterior. Comparação cabeça a cabeça (mesmo número de dias decorridos) pra isolar mudanças sazonais vs. estruturais.",
+    yoy_current: "Atual",
+    yoy_prior: "Ano anterior",
+    yoy_days: "dias",
+    yoy_tag_worse: "PIOR",
+    yoy_tag_better: "MELHOR",
+    yoy_tag_equal: "ESTÁVEL",
+    yoy_tag_no_data: "—",
+    yoy_prose_worse: "O desconto de modulação de Mauriti piorou em",
+    yoy_prose_worse_p: "vs. o mesmo período do ano anterior. Investigar causas estruturais (mais curtailment, mudança no mix horário) ou externas (spreads de PLD menores).",
+    yoy_prose_better: "A modulação melhorou em",
+    yoy_prose_better_p: "vs. o mesmo período do ano passado. Reflete spreads de PLD mais favoráveis ou melhorias operacionais.",
+    yoy_prose_equal: "Modulação essencialmente estável YoY, sugerindo condições estruturais constantes.",
+    itm_title: "Horas in/out of the money",
+    itm_desc: "Das horas que Mauriti gerou no mês, quantas coincidiram com PLD acima da média (horas valiosas, in-the-money) vs. abaixo (horas baratas, out-of-the-money). Quantifica o custo de timing solar em base hora-a-hora.",
+    itm_tag: "EXPOSIÇÃO SPOT",
+    itm_ref: "PLD médio mensal",
+    itm_total: "Total horas geração:",
+    itm_in: "In-the-money",
+    itm_out: "Out-of-the-money",
+    itm_of_hours: "das horas",
+    itm_of_mwh: "dos MWh capturados",
+    itm_prose_negskew: "Geração solar está desproporcionalmente concentrada em horas de PLD baixo: Mauriti entregou",
+    itm_prose_negskew_b: "dos MWh em apenas",
+    itm_prose_negskew_c: "das horas em que os preços estavam abaixo da média. Esta é a causa estrutural do desconto de modulação.",
+    itm_prose_posskew: "Mauriti está capturando mais horas valiosas que a média — posição favorável.",
+    itm_prose_balanced: "A geração está razoavelmente balanceada entre horas valiosas e baratas.",
+    razao_title: "Curtailment por razão · classificação ONS",
+    razao_desc: "Cada hora de curtailment é classificada pelo ONS com um código de razão. REL (indisponibilidade externa) e CNF (confiabilidade) são elegíveis a ressarcimento pela REN 1.030/2022; ENE (energético) e PAR (parecer de acesso) não. Conhecer o mix é crítico pra estratégia de pleito.",
+    razao_tag: "ELEGIBILIDADE REN 1.030",
+    razao_th_code: "Código",
+    razao_th_meaning: "Significado",
+    razao_th_mwh: "MWh",
+    razao_th_loss: "Perda (R$)",
+    razao_th_pct: "% MWh",
+    razao_th_elig: "Elegível",
+    razao_yes: "Sim",
+    razao_no: "Não",
+    razao_total: "Total",
+    razao_prose_high: "dos MWh cortados são elegíveis a ressarcimento",
+    razao_prose_high_p: " pela REN 1.030/2022. Caso forte para pleitos de ressarcimento.",
+    razao_prose_mid: "dos MWh cortados são potencialmente elegíveis a ressarcimento. Perfil misto — revisar caso a caso.",
+    razao_prose_low: "A maior parte do curtailment é ENE/PAR (não elegível a ressarcimento). Curtailment dirigido por excesso de oferta, não por falhas externas de rede."
   }
 };
 
@@ -6189,6 +6772,53 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
               f"R$/MWh, desconto {cur_pct:.2f}%, "
               f"pior dia {pior['dia'].strftime('%d')} ({pior['desconto_pct']:.1f}%)")
 
+    # ========== ONDA 2A.1: YoY Modulacao ==========
+    yoy_data = calcular_yoy_modulacao(diario_m, today)
+    if not yoy_data.get("vazio"):
+        cur_p = yoy_data.get("cur_pct")
+        prior_p = yoy_data.get("prior_pct")
+        delta = yoy_data.get("delta_pp")
+        print(f"[*] YoY modulacao: {yoy_data['label_cur']} "
+              f"{cur_p:.2f}% vs {yoy_data['label_prior']} "
+              f"{prior_p if prior_p is not None else 'N/A':.2f}% "
+              f"-> delta {delta:+.2f} pp ({yoy_data['status']})"
+              if cur_p is not None and prior_p is not None
+              else f"[*] YoY modulacao: {yoy_data['label_cur']}={cur_p}, "
+                   f"{yoy_data['label_prior']}={prior_p}")
+
+    # ========== ONDA 2A.2: In/Out-the-money do PLD ==========
+    itm_data = calcular_in_out_money(hor_m, pld, cur_first)
+    if not itm_data.get("vazio"):
+        print(f"[*] In/Out-the-money mes corrente: "
+              f"PLD ref R$ {itm_data['pld_referencia']:.0f}/MWh, "
+              f"ITM {itm_data['itm']['n_horas']}h ({itm_data['itm']['pct_horas']:.0f}%) "
+              f"capturou {itm_data['itm']['pct_mwh']:.0f}% dos MWh, "
+              f"OTM {itm_data['otm']['n_horas']}h capturou "
+              f"{itm_data['otm']['pct_mwh']:.0f}% dos MWh")
+
+    # ========== ONDA 2A.3: Breakdown REL/CNF/ENE/PAR ==========
+    df_razao = calcular_curtailment_por_razao(mauriti.df, pld)
+    razao_data = []
+    if not df_razao.empty:
+        for _, r in df_razao.iterrows():
+            razao_data.append(dict(
+                razao=r["razao"],
+                label=r["label"],
+                ressarcivel=bool(r["ressarcivel"]),
+                mwh_total=float(r["mwh_total"]),
+                n_eventos=int(r["n_eventos"]),
+                perd_rs=float(r["perd_rs"]),
+                pct_mwh=float(r["pct_mwh"]),
+                pct_rs=float(r["pct_rs"]),
+            ))
+        total_mwh = sum(r["mwh_total"] for r in razao_data)
+        total_rs = sum(r["perd_rs"] for r in razao_data)
+        pct_ress_mwh = sum(r["mwh_total"] for r in razao_data
+                            if r["ressarcivel"]) / total_mwh * 100 if total_mwh > 0 else 0
+        print(f"[*] Curtailment por razao: {len(razao_data)} categorias, "
+              f"total {total_mwh:,.0f} MWh / R$ {total_rs/1e6:.1f}M perdidos, "
+              f"{pct_ress_mwh:.0f}% ressarcivel (REL+CNF)")
+
     # ========== AGREGADO MENSAL PARA O SIMULADOR PPA ==========
     # Para cada mes, agrega geração+receita de Mauriti + PLD de todos os
     # submercados. JS no client-side usa pra simular cenarios de PPA.
@@ -6472,6 +7102,11 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         figs["irr_scatter"] = json.loads(pio.to_json(g_irrad_scatter(cruz_irr)))
         figs["irr_perfil"]  = json.loads(pio.to_json(g_irrad_perfil(cruz_irr)))
 
+    # ===== ONDA 2A.3: Donut chart curtailment por razao =====
+    if not df_razao.empty:
+        figs["razao_donut"] = json.loads(pio.to_json(
+            g_donut_curtailment_razao(df_razao)))
+
     grupos_str = ", ".join([g.label for g in grupos]) if grupos else "—"
     pld_fallback = bool(pld.attrs.get("fallback", False))
 
@@ -6521,6 +7156,9 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         dash_version_date=DASH_VERSION_DATE,
         dash_changes=DASH_CHANGES,
         freshness=freshness_data,
+        yoy_modulation=yoy_data,
+        itm_otm=itm_data,
+        razao_breakdown=razao_data,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
