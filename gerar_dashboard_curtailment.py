@@ -60,9 +60,11 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.8"
+DASH_VERSION = "5.9"
 DASH_VERSION_DATE = "2026-05-19"
 DASH_CHANGES = [
+    "v5.9 (2026-05-19): Onda 2A - YoY modulation, In/Out-the-money, "
+    "breakdown REL/CNF/ENE/PAR com periodo + tooltips",
     "v5.8 (2026-05-19): Onda 1 - PLD freshness badge, modo apresentacao, "
     "tooltips, modo dark/light, atalhos teclado, print/screenshot, footer",
     "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
@@ -135,12 +137,33 @@ CCEE_PLD_URLS: dict[int, str] = {
 }
 
 RAZAO_LABEL = {
-    "REL": "Indisponibilidade externa",
-    "CNF": "Confiabilidade",
-    "ENE": "Energetico",
+    "REL": "Restrição elétrica externa",
+    "CNF": "Reserva de confiabilidade",
+    "ENE": "Excesso de oferta (energético)",
     "PAR": "Parecer de acesso",
+    "DESCONHECIDA": "Sem classificação ONS",
 }
-RAZAO_RESSARCIVEL = {"REL": True, "CNF": True, "ENE": False, "PAR": False}
+RAZAO_RESSARCIVEL = {"REL": True, "CNF": True, "ENE": False, "PAR": False,
+                          "DESCONHECIDA": False}
+# Descricoes detalhadas pra tooltips no card
+RAZAO_TOOLTIP = {
+    "REL": "Restrição operativa por indisponibilidade de equipamentos da rede "
+              "elétrica externa à usina (linhas de transmissão, barramentos, "
+              "transformadores). Elegível a ressarcimento pela REN 1.030/2022.",
+    "CNF": "Restrição operada pelo ONS para manter reserva de confiabilidade do "
+              "sistema (potência sincronizada disponível para contingências). "
+              "Elegível a ressarcimento pela REN 1.030/2022.",
+    "ENE": "Restrição por excesso de oferta de energia no SIN, tipicamente em "
+              "horários de pico solar/eólico com demanda baixa. Não-elegível "
+              "porque é gestão de balanço energético, não falha externa.",
+    "PAR": "Restrição decorrente de cláusulas do Parecer de Acesso à rede "
+              "(acordos contratuais com a transmissora). Não-elegível porque "
+              "é restrição contratual prevista, não falha operativa.",
+    "DESCONHECIDA": "Linhas de curtailment sem código de razão preenchido pelo "
+                       "ONS. Acontece em casos: (a) publicação recente — ONS "
+                       "ainda não classificou; (b) restrição implícita sem "
+                       "ordem operativa formal; (c) erro de preenchimento.",
+}
 
 # Origem da restricao (cod_origemrestricao). Dataset ONS usa 2 valores principais:
 # LOC = local (proximo da usina); SIS = sistemico (rede regional).
@@ -1409,10 +1432,11 @@ def g_donut_curtailment_razao(df_razao: pd.DataFrame) -> go.Figure:
 
     # Cores por categoria
     cores = {
-        "REL": "#a8442f",  # ressarcivel - laranja escuro
-        "CNF": "#d57255",  # ressarcivel - laranja claro
-        "ENE": "#857d72",  # nao-ressarcivel - cinza
-        "PAR": "#c8c0ad",  # nao-ressarcivel - bege
+        "REL": "#a8442f",          # ressarcivel - laranja escuro
+        "CNF": "#d57255",          # ressarcivel - laranja claro
+        "ENE": "#857d72",          # nao-ressarcivel - cinza
+        "PAR": "#c8c0ad",          # nao-ressarcivel - bege
+        "DESCONHECIDA": "#b8b0a0", # nao-classificado - cinza claro
     }
     colors = [cores.get(r, "#999999") for r in df_razao["razao"]]
 
@@ -2923,6 +2947,18 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 @media (max-width:720px){.itm-grid{grid-template-columns:1fr;gap:12px}}
 
 /* ===== ONDA 2A: Razao breakdown card ===== */
+.razao-period{font-size:12px;color:var(--ink-2);margin:8px 0 16px;
+  padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  font-family:'IBM Plex Mono',monospace}
+.razao-period strong{color:var(--ink);letter-spacing:0.08em;
+  text-transform:uppercase;font-size:10px;font-weight:600}
+.razao-period-sep{color:var(--muted)}
+.razao-note-warn{font-size:12px;color:var(--ink-2);line-height:1.5;
+  padding:10px 14px;background:#fff7e0;border-left:3px solid var(--warn);
+  border-radius:2px;margin:14px 0 10px}
+.razao-note-warn strong{color:#a07a00;font-weight:600}
+.razao-notes{margin-top:14px;padding-top:10px;border-top:1px solid var(--border)}
 .razao-card{background:var(--panel);border:1px solid var(--border2);
   border-radius:4px;padding:24px;margin:24px 0}
 .razao-grid{display:grid;grid-template-columns:340px 1fr;gap:28px;
@@ -2944,8 +2980,8 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   font-size:10px;font-weight:600;letter-spacing:0.06em}
 .razao-tag.elig{background:#dff5e8;color:#2d5a3d}
 .razao-tag.noelig{background:var(--bg-alt);color:var(--muted)}
-.razao-prose{margin-top:14px;font-size:13px;color:var(--ink-2);
-  line-height:1.6;padding-top:10px;border-top:1px solid var(--border)}
+.razao-prose{font-size:13px;color:var(--ink-2);
+  line-height:1.6;margin:0}
 @media (max-width:840px){
   .razao-grid{grid-template-columns:1fr}
 }
@@ -3860,10 +3896,21 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <p class="section-desc" data-i18n="razao_desc">
       Each curtailment hour is classified by ONS with a reason code. REL
       (external unavailability) and CNF (reliability) are eligible for
-      compensation under REN 1.030/2022; ENE (energy/oversupply) and PAR
+      compensation under REN 1.030/2022; ENE (oversupply) and PAR
       (access opinion) are not. Knowing the mix is critical for ressarcement
       strategy.
     </p>
+
+    <div class="razao-period">
+      <strong data-i18n="razao_period_label">Period:</strong>
+      <span>{{ razao_meta.periodo_inicio }} <span data-i18n="razao_period_to">to</span> {{ razao_meta.periodo_fim }}</span>
+      <span class="razao-period-sep">·</span>
+      <span>{{ razao_meta.n_meses }} <span data-i18n="razao_period_months">months</span></span>
+      <span class="razao-period-sep">·</span>
+      <span><strong>{{ "{:,.0f}".format(razao_meta.total_mwh).replace(",", " ") }}</strong> MWh <span data-i18n="razao_total_curt">total curtailed</span></span>
+      <span class="razao-period-sep">·</span>
+      <span><strong>R$ {{ "%.1f"|format(razao_meta.total_rs/1e6) }}M</strong> <span data-i18n="razao_total_lost">lost</span></span>
+    </div>
 
     <div class="razao-card">
       <div class="razao-grid">
@@ -3885,13 +3932,18 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
             <tbody>
               {% for r in razao_breakdown %}
               <tr class="razao-row razao-{{ r.razao|lower }}">
-                <td><strong>{{ r.razao }}</strong></td>
+                <td>
+                  <strong>{{ r.razao }}</strong>
+                  <span class="kpi-tip" data-tip="{{ r.tooltip }}"></span>
+                </td>
                 <td>{{ r.label }}</td>
                 <td class="num">{{ "{:,.0f}".format(r.mwh_total).replace(",", " ") }}</td>
                 <td class="num">R$ {{ "%.1f"|format(r.perd_rs/1e6) }}M</td>
                 <td class="num">{{ "%.1f"|format(r.pct_mwh) }}%</td>
                 <td>
-                  {% if r.ressarcivel %}
+                  {% if r.razao == "DESCONHECIDA" %}
+                    <span class="razao-tag noelig" data-i18n="razao_unclass">N/A</span>
+                  {% elif r.ressarcivel %}
                     <span class="razao-tag elig" data-i18n="razao_yes">Yes</span>
                   {% else %}
                     <span class="razao-tag noelig" data-i18n="razao_no">No</span>
@@ -3902,31 +3954,38 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
             </tbody>
             <tfoot>
               <tr class="razao-foot">
-                {% set tot_mwh = razao_breakdown | sum(attribute='mwh_total') %}
-                {% set tot_rs  = razao_breakdown | sum(attribute='perd_rs') %}
-                {% set ress_mwh = razao_breakdown | selectattr('ressarcivel') | sum(attribute='mwh_total') %}
-                {% set ress_pct = (100 * ress_mwh / tot_mwh) if tot_mwh > 0 else 0 %}
                 <td colspan="2"><strong data-i18n="razao_total">Total</strong></td>
-                <td class="num"><strong>{{ "{:,.0f}".format(tot_mwh).replace(",", " ") }}</strong></td>
-                <td class="num"><strong>R$ {{ "%.1f"|format(tot_rs/1e6) }}M</strong></td>
+                <td class="num"><strong>{{ "{:,.0f}".format(razao_meta.total_mwh).replace(",", " ") }}</strong></td>
+                <td class="num"><strong>R$ {{ "%.1f"|format(razao_meta.total_rs/1e6) }}M</strong></td>
                 <td class="num"></td>
                 <td>
-                  <span class="razao-tag elig">{{ "%.0f"|format(ress_pct) }}%</span>
+                  <span class="razao-tag elig">{{ "%.0f"|format(razao_meta.pct_ressarcivel) }}%</span>
                 </td>
               </tr>
             </tfoot>
           </table>
-          <p class="razao-prose">
-            {% if ress_pct > 70 %}
-              <strong data-i18n="razao_prose_high">{{ "%.0f"|format(ress_pct) }}% of curtailed MWh is eligible for compensation</strong>
-              <span data-i18n="razao_prose_high_p"> under REN 1.030/2022. Strong case for ressarcement claims.</span>
-            {% elif ress_pct > 40 %}
-              <strong>{{ "%.0f"|format(ress_pct) }}%</strong>
-              <span data-i18n="razao_prose_mid">of curtailed MWh is potentially eligible for ressarcement. Mixed profile — review case by case.</span>
-            {% else %}
-              <span data-i18n="razao_prose_low">Most curtailment is ENE/PAR (not eligible for ressarcement). Curtailment driven mainly by oversupply, not by external network failures.</span>
+
+          <div class="razao-notes">
+            {% if razao_meta.pct_classificado < 95 %}
+            <p class="razao-note-warn">
+              <strong data-i18n="razao_note_class">⚠ Note about classification:</strong>
+              <span data-i18n="razao_note_class_p1">{{ "%.1f"|format(100 - razao_meta.pct_classificado) }}% of curtailed MWh has no ONS reason code yet ("Sem classificação"). These hours are typically from recent days where ONS has not finalized the classification — they may be reclassified in future updates.</span>
+            </p>
             {% endif %}
-          </p>
+
+            <p class="razao-prose">
+              {% if razao_meta.pct_ressarcivel > 70 %}
+                <strong data-i18n="razao_prose_high">{{ "%.0f"|format(razao_meta.pct_ressarcivel) }}% of curtailed MWh is eligible for compensation</strong>
+                <span data-i18n="razao_prose_high_p"> under REN 1.030/2022. Strong case for ressarcement claims.</span>
+              {% elif razao_meta.pct_ressarcivel > 40 %}
+                <strong>{{ "%.0f"|format(razao_meta.pct_ressarcivel) }}%</strong>
+                <span data-i18n="razao_prose_mid">of curtailed MWh is potentially eligible for ressarcement. Mixed profile — review case by case.</span>
+              {% else %}
+                <span data-i18n="razao_prose_low">Most curtailment is ENE/PAR (not eligible for ressarcement). Curtailment driven mainly by oversupply, not by external network failures.</span>
+                <strong> ({{ "%.0f"|format(razao_meta.pct_ressarcivel) }}%</strong> <span data-i18n="razao_prose_low_elig">eligible)</span>.
+              {% endif %}
+            </p>
+          </div>
         </div>
       </div>
     </div>
@@ -5390,8 +5449,13 @@ const I18N = {
     itm_prose_posskew: "Mauriti está capturando mais horas valiosas que a média — posição favorável.",
     itm_prose_balanced: "A geração está razoavelmente balanceada entre horas valiosas e baratas.",
     razao_title: "Curtailment por razão · classificação ONS",
-    razao_desc: "Cada hora de curtailment é classificada pelo ONS com um código de razão. REL (indisponibilidade externa) e CNF (confiabilidade) são elegíveis a ressarcimento pela REN 1.030/2022; ENE (energético) e PAR (parecer de acesso) não. Conhecer o mix é crítico pra estratégia de pleito.",
+    razao_desc: "Cada hora de curtailment é classificada pelo ONS com um código de razão. REL (indisponibilidade externa) e CNF (confiabilidade) são elegíveis a ressarcimento pela REN 1.030/2022; ENE (excesso de oferta) e PAR (parecer de acesso) não. Conhecer o mix é crítico pra estratégia de pleito.",
     razao_tag: "ELEGIBILIDADE REN 1.030",
+    razao_period_label: "Período:",
+    razao_period_to: "a",
+    razao_period_months: "meses",
+    razao_total_curt: "total cortado",
+    razao_total_lost: "perdidos",
     razao_th_code: "Código",
     razao_th_meaning: "Significado",
     razao_th_mwh: "MWh",
@@ -5400,11 +5464,15 @@ const I18N = {
     razao_th_elig: "Elegível",
     razao_yes: "Sim",
     razao_no: "Não",
+    razao_unclass: "N/A",
     razao_total: "Total",
+    razao_note_class: "⚠ Nota sobre classificação:",
+    razao_note_class_p1: "dos MWh cortados não tem código de razão do ONS ainda (\"Sem classificação\"). Essas horas tipicamente são dos últimos dias, onde o ONS ainda não finalizou a classificação — podem ser reclassificadas em atualizações futuras.",
     razao_prose_high: "dos MWh cortados são elegíveis a ressarcimento",
     razao_prose_high_p: " pela REN 1.030/2022. Caso forte para pleitos de ressarcimento.",
     razao_prose_mid: "dos MWh cortados são potencialmente elegíveis a ressarcimento. Perfil misto — revisar caso a caso.",
-    razao_prose_low: "A maior parte do curtailment é ENE/PAR (não elegível a ressarcimento). Curtailment dirigido por excesso de oferta, não por falhas externas de rede."
+    razao_prose_low: "A maior parte do curtailment é ENE/PAR (não elegível a ressarcimento). Curtailment dirigido por excesso de oferta, não por falhas externas de rede.",
+    razao_prose_low_elig: "elegível)"
   }
 };
 
@@ -6807,11 +6875,14 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
     # ========== ONDA 2A.3: Breakdown REL/CNF/ENE/PAR ==========
     df_razao = calcular_curtailment_por_razao(mauriti.df, pld)
     razao_data = []
+    razao_meta = {}
     if not df_razao.empty:
         for _, r in df_razao.iterrows():
             razao_data.append(dict(
                 razao=r["razao"],
                 label=r["label"],
+                tooltip=RAZAO_TOOLTIP.get(r["razao"],
+                                              "Razão de curtailment do ONS."),
                 ressarcivel=bool(r["ressarcivel"]),
                 mwh_total=float(r["mwh_total"]),
                 n_eventos=int(r["n_eventos"]),
@@ -6819,13 +6890,39 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                 pct_mwh=float(r["pct_mwh"]),
                 pct_rs=float(r["pct_rs"]),
             ))
+        # Calcula periodo da analise (= periodo do mauriti.df total)
+        if not mauriti.df.empty:
+            primeiro_dia = mauriti.df["din_instante"].min()
+            ultimo_dia = mauriti.df["din_instante"].max()
+            n_meses = ((ultimo_dia.year - primeiro_dia.year) * 12 +
+                        (ultimo_dia.month - primeiro_dia.month) + 1)
+            meses_curtos = ["jan", "fev", "mar", "abr", "mai", "jun",
+                              "jul", "ago", "set", "out", "nov", "dez"]
+            razao_meta = dict(
+                periodo_inicio=primeiro_dia.strftime("%d/%m/%Y"),
+                periodo_fim=ultimo_dia.strftime("%d/%m/%Y"),
+                periodo_label=(
+                    f"{meses_curtos[primeiro_dia.month-1]}/{str(primeiro_dia.year)[2:]} "
+                    f"a {meses_curtos[ultimo_dia.month-1]}/{str(ultimo_dia.year)[2:]}"
+                ),
+                n_meses=n_meses,
+            )
         total_mwh = sum(r["mwh_total"] for r in razao_data)
         total_rs = sum(r["perd_rs"] for r in razao_data)
+        n_classif = sum(r["mwh_total"] for r in razao_data
+                            if r["razao"] != "DESCONHECIDA")
+        pct_classif = (100 * n_classif / total_mwh) if total_mwh > 0 else 0
+        razao_meta["total_mwh"] = total_mwh
+        razao_meta["total_rs"] = total_rs
+        razao_meta["pct_classificado"] = pct_classif
         pct_ress_mwh = sum(r["mwh_total"] for r in razao_data
                             if r["ressarcivel"]) / total_mwh * 100 if total_mwh > 0 else 0
+        razao_meta["pct_ressarcivel"] = pct_ress_mwh
         print(f"[*] Curtailment por razao: {len(razao_data)} categorias, "
               f"total {total_mwh:,.0f} MWh / R$ {total_rs/1e6:.1f}M perdidos, "
-              f"{pct_ress_mwh:.0f}% ressarcivel (REL+CNF)")
+              f"{pct_ress_mwh:.0f}% ressarcivel (REL+CNF), "
+              f"{pct_classif:.0f}% classificado pelo ONS "
+              f"({razao_meta.get('periodo_label', '?')})")
 
     # ========== AGREGADO MENSAL PARA O SIMULADOR PPA ==========
     # Para cada mes, agrega geração+receita de Mauriti + PLD de todos os
@@ -7167,6 +7264,7 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         yoy_modulation=yoy_data,
         itm_otm=itm_data,
         razao_breakdown=razao_data,
+        razao_meta=razao_meta,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
