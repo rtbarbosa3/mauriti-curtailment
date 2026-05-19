@@ -1361,13 +1361,21 @@ def calcular_curtailment_por_razao(df_mauriti: pd.DataFrame,
     if df.empty:
         return pd.DataFrame()
 
-    # Cruza com PLD para perda financeira
-    if not pld.empty:
-        df = df.merge(pld[["hora", "pld"]], left_on="din_instante",
-                          right_on="hora", how="left")
+    # mauriti.df ja vem com a coluna 'pld' do enrichment (funcao
+    # enriquecer_curtailment), entao calcula perda direto sem precisar
+    # de merge adicional (que causaria conflito de nome _x/_y).
+    if "pld" in df.columns:
         df["perd_rs"] = df["curtailment_mwh"] * df["pld"].fillna(0)
     else:
-        df["perd_rs"] = 0.0
+        # Fallback: se nao tem pld pre-juntado, faz merge defensivo
+        if not pld.empty:
+            pld_temp = pld[["hora", "pld"]].rename(columns={"pld": "_pld_tmp"})
+            df["hora_floor"] = df["din_instante"].dt.floor("h")
+            df = df.merge(pld_temp, left_on="hora_floor", right_on="hora",
+                              how="left")
+            df["perd_rs"] = df["curtailment_mwh"] * df["_pld_tmp"].fillna(0)
+        else:
+            df["perd_rs"] = 0.0
 
     # Agrega
     agg = df.groupby("cod_razaorestricao").agg(
