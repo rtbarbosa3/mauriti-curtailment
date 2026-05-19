@@ -59,6 +59,18 @@ import plotly.io as pio
 #  CONFIGURACAO
 # =============================================================================
 
+# Versao do dashboard. Atualizar a cada onda de mudancas.
+DASH_VERSION = "5.8"
+DASH_VERSION_DATE = "2026-05-19"
+DASH_CHANGES = [
+    "v5.8 (2026-05-19): Onda 1 - PLD freshness badge, modo apresentacao, "
+    "tooltips, modo dark/light, atalhos teclado, print/screenshot, footer",
+    "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
+    "v5.6 (2026-05-17): Monthly forecast (CCEE View + Commercial + 3 cards)",
+    "v5.5 (2026-05-15): Tracker upgrades + Benchmark v2 multi-select",
+    "v5.4 (2026-05-13): Cron diario + Solar fix + 2 PPAs",
+]
+
 CONFIG: dict[str, Any] = {
     # Periodo de analise (AAAA-MM-DD). data_fim = None usa hoje.
     "data_inicio": "2025-07-01",
@@ -2535,6 +2547,92 @@ HTML_TEMPLATE = r"""<!doctype html>
   --accent-today:#d92e0f; --neutral:#5a5147; --ok:#2d5a3d;
   --warn:#d4a017;
 }
+
+/* ===== Dark theme ===== */
+html[data-theme="dark"]{
+  --bg:#1a1715; --bg-alt:#23201d; --panel:#2a2622;
+  --border:#3d3833; --border2:#4a443c;
+  --ink:#fafaf6; --ink-2:#e6e1d4; --muted:#a09689;
+  --rule:#4a443c; --accent:#d57255; --accent-2:#b85a3d;
+  --accent-today:#ff5a3a; --neutral:#a09689; --ok:#5db978;
+  --warn:#e8b73e;
+}
+
+/* ===== Toolbar fixa (canto superior direito) ===== */
+.toolbar{position:fixed;top:24px;right:24px;z-index:1000;
+  display:flex;gap:8px;align-items:center;
+  background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:6px;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+.toolbar-btn{background:transparent;border:none;cursor:pointer;
+  padding:6px 8px;color:var(--muted);font-family:inherit;
+  font-size:13px;border-radius:3px;transition:all 0.15s;
+  display:inline-flex;align-items:center;gap:4px;line-height:1}
+.toolbar-btn:hover{color:var(--ink);background:var(--bg-alt)}
+.toolbar-btn.active{background:var(--ink);color:var(--bg)}
+.toolbar-btn svg{width:14px;height:14px;flex-shrink:0}
+.toolbar-divider{width:1px;height:18px;background:var(--border2)}
+
+/* ===== Freshness badges no masthead ===== */
+.freshness{display:inline-flex;gap:12px;font-size:10px;
+  color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;
+  margin-top:4px;flex-wrap:wrap}
+.freshness-item{display:inline-flex;align-items:center;gap:4px}
+.freshness-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  display:inline-block;animation:pulse 2s infinite}
+.freshness-dot.stale{background:var(--warn);animation:none}
+.freshness-dot.old{background:var(--accent-today);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+
+/* ===== Tooltips em KPIs ===== */
+.kpi-tip{position:relative;display:inline-block;cursor:help;
+  border-bottom:1px dotted var(--muted);margin-left:3px}
+.kpi-tip::after{content:"?";display:inline-block;width:12px;height:12px;
+  margin-left:3px;font-size:9px;color:var(--muted);background:var(--bg-alt);
+  border-radius:50%;text-align:center;line-height:12px;font-weight:bold}
+.kpi-tip:hover{border-bottom-color:var(--accent)}
+.kpi-tip[data-tip]:hover::before{content:attr(data-tip);
+  position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);
+  background:var(--ink);color:var(--bg);padding:8px 12px;border-radius:4px;
+  font-size:11px;font-weight:400;line-height:1.4;letter-spacing:0;
+  text-transform:none;white-space:normal;width:260px;z-index:1500;
+  box-shadow:0 4px 12px rgba(0,0,0,0.2);
+  font-family:'IBM Plex Sans',sans-serif}
+
+/* ===== Modo apresentacao (fullscreen) ===== */
+html[data-mode="present"] .toolbar,
+html[data-mode="present"] .lang-toggle,
+html[data-mode="present"] .tabs,
+html[data-mode="present"] .masthead{display:none !important}
+html[data-mode="present"] .wrap{max-width:none;padding:24px 48px}
+html[data-mode="present"] .tab-pane:not(.active){display:none !important}
+
+/* ===== Versao + changelog ===== */
+.version-info{font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--muted);margin-top:8px}
+.version-info code{background:var(--bg-alt);padding:2px 6px;
+  border-radius:2px;color:var(--accent)}
+.changelog-toggle{cursor:pointer;color:var(--muted);text-decoration:underline;
+  text-decoration-style:dotted;font-size:10px;margin-left:6px}
+.changelog-toggle:hover{color:var(--accent)}
+.changelog-list{font-size:10px;line-height:1.7;margin:8px 0 0 16px;
+  list-style:none;padding:0;color:var(--muted)}
+.changelog-list li{margin-bottom:2px;font-family:'IBM Plex Mono',monospace}
+
+/* ===== Credits no footer ===== */
+.credits{font-size:10px;color:var(--muted);line-height:1.6;
+  margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}
+.credits-row{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.credits-row span{display:inline-flex;align-items:center;gap:4px}
+
+/* ===== Print styles ===== */
+@media print{
+  .toolbar,.lang-toggle,.tabs{display:none !important}
+  .tab-pane:not(.active){display:none !important}
+  .wrap{max-width:none;padding:0}
+  body{background:white;color:black}
+  a{color:black !important;text-decoration:none}
+}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -3120,8 +3218,38 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 </head>
 <body>
 
-<!-- Language toggle -->
-<div class="lang-toggle">
+<!-- Toolbar superior (Print, Dark mode, Fullscreen, Lang) -->
+<div class="toolbar">
+  <button class="toolbar-btn" id="tb-print" title="Print / Save PDF (P)" aria-label="Print">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6 9 6 2 18 2 18 9"></polyline>
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+      <rect x="6" y="14" width="12" height="8"></rect>
+    </svg>
+  </button>
+  <button class="toolbar-btn" id="tb-theme" title="Dark / Light mode (D)" aria-label="Theme">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+    </svg>
+  </button>
+  <button class="toolbar-btn" id="tb-fullscreen" title="Presentation mode (F)" aria-label="Fullscreen">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 3H5a2 2 0 0 0-2 2v3"></path>
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3"></path>
+      <path d="M3 16v3a2 2 0 0 0 2 2h3"></path>
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>
+    </svg>
+  </button>
+  <span class="toolbar-divider"></span>
+  <button class="toolbar-btn lang-btn active" data-set-lang="en">EN</button>
+  <button class="toolbar-btn lang-btn" data-set-lang="pt">PT</button>
+</div>
+
+<!-- (lang-toggle antigo desativado; agora dentro da toolbar) -->
+<div class="lang-toggle" style="display:none">
   <button class="lang-btn active" data-set-lang="en">EN</button>
   <button class="lang-btn" data-set-lang="pt">PT</button>
 </div>
@@ -3135,6 +3263,22 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       <span data-i18n="updated">Updated</span>
       {{ gerado_em }}
     </div>
+    {% if freshness %}
+    <div class="freshness">
+      <span class="freshness-item">
+        <span class="freshness-dot {{ freshness.ons_status }}"></span>
+        <span data-i18n="fresh_ons">Curtailment ONS</span>:&nbsp;<strong>{{ freshness.ons_last }}</strong>
+      </span>
+      <span class="freshness-item">
+        <span class="freshness-dot {{ freshness.pld_status }}"></span>
+        <span data-i18n="fresh_pld">PLD CCEE</span>:&nbsp;<strong>{{ freshness.pld_last }}</strong>
+      </span>
+      <span class="freshness-item">
+        <span class="freshness-dot ok"></span>
+        <span data-i18n="fresh_next">Next update</span>:&nbsp;<strong>{{ freshness.next_run }}</strong>
+      </span>
+    </div>
+    {% endif %}
   </div>
 
   <div class="tabs">
@@ -3231,17 +3375,26 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
       <div class="tracker-stats">
         <div class="t-stat">
-          <div class="lbl" data-i18n="expected_month">Expected (month)</div>
+          <div class="lbl">
+            <span data-i18n="expected_month">Expected (month)</span>
+            <span class="kpi-tip" data-tip="Expected MWh = installed capacity × daytime hours × theoretical CF. Reference for what Mauriti would have generated without curtailment."></span>
+          </div>
           <div class="val">{{ "%.1f"|format(tracker.esperada_mes) }}<span class="unit">MWh</span></div>
           <div class="delta">{{ tracker.dias_decorridos }} <span data-i18n="days_short">days</span></div>
         </div>
         <div class="t-stat">
-          <div class="lbl" data-i18n="cut_month">Curtailed (month)</div>
+          <div class="lbl">
+            <span data-i18n="cut_month">Curtailed (month)</span>
+            <span class="kpi-tip" data-tip="MWh curtailed = expected − actual generation. Includes all ONS reasons (REL/CNF/ENE/PAR)."></span>
+          </div>
           <div class="val">{{ "%.1f"|format(tracker.cortada_mes) }}<span class="unit">MWh</span></div>
           <div class="delta"><span data-i18n="of_lower">of</span> {{ "%.1f"|format(tracker.esperada_mes) }} <span data-i18n="expected_lower">expected</span></div>
         </div>
         <div class="t-stat alt">
-          <div class="lbl" data-i18n="cf_month">CF% of month</div>
+          <div class="lbl">
+            <span data-i18n="cf_month">CF% of month</span>
+            <span class="kpi-tip" data-tip="Curtailment Factor (CF%) = curtailed MWh ÷ expected MWh × 100. Lower is better. Compared to 22.7% prior-quarter Mauriti average."></span>
+          </div>
           <div class="val">{{ "%.2f"|format(tracker.cf_mes) }}<span class="unit">%</span></div>
           {% if tracker.delta_cf is not none %}
           <div class="delta {% if tracker.delta_cf > 0 %}up{% else %}down{% endif %}">
@@ -4298,6 +4451,36 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <p class="colofao">Mauriti — Curtailment, Modulation, REN 1.030 &amp;
        Solar Resource report. <span data-i18n="footer_built">Built</span>
        {{ gerado_em }}.</p>
+
+    <div class="credits">
+      <div class="credits-row">
+        <span><strong data-i18n="cred_data">Data sources</strong>:</span>
+        <span>ONS <span data-i18n="cred_ons">Open Data</span></span>
+        <span>&middot;</span>
+        <span>CCEE <span data-i18n="cred_ccee">Open Data Portal</span></span>
+        <span>&middot;</span>
+        <span>NASA POWER (GHI)</span>
+      </div>
+      <div class="credits-row" style="margin-top:6px">
+        <span><strong data-i18n="cred_tech">Tech stack</strong>:</span>
+        <span>Python &middot; pandas &middot; Plotly &middot; curl_cffi (TLS bypass)</span>
+        <span>&middot;</span>
+        <span>GitHub Actions (daily 09:15 BRT)</span>
+      </div>
+      <div class="version-info">
+        <span data-i18n="cred_version">Version</span>:
+        <code>v{{ dash_version }}</code>
+        <span data-i18n="cred_released">released</span> {{ dash_version_date }}
+        <span class="changelog-toggle" onclick="toggleChangelog()">
+          [<span data-i18n="cred_changelog">changelog</span>]
+        </span>
+      </div>
+      <ul class="changelog-list" id="changelog-list" style="display:none">
+        {% for entry in dash_changes %}
+        <li>{{ entry }}</li>
+        {% endfor %}
+      </ul>
+    </div>
   </footer>
 
 </div>
@@ -4619,7 +4802,18 @@ const I18N = {
     footer_defs_p: "Curtailment = max(0, val_geracaoestimada − val_geracaoverificada). Receita perdida = curtailment_MWh × PLD_horário. CF = curtailment / esperada (%). Desconto modulação = (Σ MWh<sub>h</sub> × PLD<sub>h</sub>) − (Σ MWh<sub>dia</sub> × PLD<sub>medio_dia</sub>).",
     footer_bench: "Benchmark NE",
     footer_bench_p: "O benchmark de modulação agrega todas as UFVs do submercado NE como uma frota única, ponderando pela geração. Mostra o desconto que a frota NE coletivamente sofreu.",
-    footer_built: "Gerado em"
+    footer_built: "Gerado em",
+    // ===== ONDA 1 =====
+    fresh_ons: "Curtailment ONS",
+    fresh_pld: "PLD CCEE",
+    fresh_next: "Próxima atualização",
+    cred_data: "Fontes de dados",
+    cred_ons: "Dados Abertos",
+    cred_ccee: "Portal Dados Abertos",
+    cred_tech: "Stack técnico",
+    cred_version: "Versão",
+    cred_released: "lançada em",
+    cred_changelog: "histórico de mudanças"
   }
 };
 
@@ -5661,6 +5855,100 @@ function benchInit() {
 
 benchInit();
 window.addEventListener('mauriti-lang-changed', benchRender);
+
+// =============================================================================
+// ONDA 1: Toolbar handlers (print, theme, fullscreen, keyboard, changelog)
+// =============================================================================
+
+// ===== Tema (dark/light) =====
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('mauriti-theme', theme); } catch (e) {}
+}
+// Carrega tema salvo (ou light por padrao)
+try {
+  const savedTheme = localStorage.getItem('mauriti-theme') || 'light';
+  applyTheme(savedTheme);
+} catch (e) { applyTheme('light'); }
+
+document.getElementById('tb-theme').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'light';
+  applyTheme(cur === 'dark' ? 'light' : 'dark');
+});
+
+// ===== Modo apresentacao (fullscreen) =====
+function togglePresentMode() {
+  const html = document.documentElement;
+  const cur = html.getAttribute('data-mode');
+  if (cur === 'present') {
+    html.removeAttribute('data-mode');
+    if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  } else {
+    html.setAttribute('data-mode', 'present');
+    if (html.requestFullscreen) html.requestFullscreen().catch(() => {});
+  }
+}
+document.getElementById('tb-fullscreen').addEventListener('click', togglePresentMode);
+
+// Detecta saida do fullscreen via Esc
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.removeAttribute('data-mode');
+  }
+});
+
+// ===== Print / Save PDF =====
+document.getElementById('tb-print').addEventListener('click', () => {
+  window.print();
+});
+
+// ===== Atalhos de teclado =====
+document.addEventListener('keydown', (e) => {
+  // Ignora se usuario esta digitando em input/textarea/select
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' ||
+      e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) {
+    return;
+  }
+  const key = e.key.toLowerCase();
+  const tabMap = {
+    'c': 'curt', 'm': 'mod', 'r': 'ren', 's': 'solar', 'b': 'bench',
+  };
+  if (key in tabMap) {
+    const tab = document.querySelector(`.tab[data-tab="${tabMap[key]}"]`);
+    if (tab) { tab.click(); e.preventDefault(); }
+  } else if (key === 'd') {
+    document.getElementById('tb-theme').click();
+    e.preventDefault();
+  } else if (key === 'f') {
+    document.getElementById('tb-fullscreen').click();
+    e.preventDefault();
+  } else if (key === 'p') {
+    document.getElementById('tb-print').click();
+    e.preventDefault();
+  } else if (key === '?') {
+    // Mostra modal com lista de atalhos
+    alert(
+      'Atalhos de teclado:\n\n' +
+      '  C - Aba Curtailment\n' +
+      '  M - Aba Modulation effect\n' +
+      '  R - Aba REN 1.030 tracker\n' +
+      '  S - Aba Solar resource\n' +
+      '  B - Aba Benchmark\n\n' +
+      '  D - Toggle Dark/Light mode\n' +
+      '  F - Toggle Presentation mode\n' +
+      '  P - Print / Save PDF\n' +
+      '  ? - Mostra atalhos'
+    );
+  }
+});
+
+// ===== Changelog toggle =====
+function toggleChangelog() {
+  const list = document.getElementById('changelog-list');
+  if (list) {
+    list.style.display = list.style.display === 'none' ? 'block' : 'none';
+  }
+}
 </script>
 
 </body>
@@ -6186,11 +6474,53 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
 
     grupos_str = ", ".join([g.label for g in grupos]) if grupos else "—"
     pld_fallback = bool(pld.attrs.get("fallback", False))
+
+    # ===== ONDA 1: Freshness data =====
+    # Calcula datas dos ultimos dados disponiveis vs hoje
+    # Status: ok (< 2 dias) / stale (2-5 dias) / old (> 5 dias)
+    def _freshness_status(last_date, today_date):
+        if last_date is None:
+            return "old"
+        delta_days = (today_date - last_date).days
+        if delta_days <= 2:
+            return "ok"
+        elif delta_days <= 5:
+            return "stale"
+        return "old"
+
+    # Ultimo dia ONS curtailment (do mauriti.df)
+    ons_last_date = None
+    try:
+        if not mauriti.df.empty:
+            ons_last_date = mauriti.df["din_instante"].max().date()
+    except Exception:
+        pass
+    # Ultimo dia PLD CCEE
+    pld_last_date = None
+    try:
+        if not pld.empty:
+            pld_last_date = pld["hora"].max().date()
+    except Exception:
+        pass
+    # Proxima execucao: 9:15 BRT do dia seguinte (= 12:15 UTC)
+    proxima = today + timedelta(days=1)
+    freshness_data = dict(
+        ons_last=ons_last_date.strftime("%d/%m") if ons_last_date else "—",
+        ons_status=_freshness_status(ons_last_date, today),
+        pld_last=pld_last_date.strftime("%d/%m") if pld_last_date else "—",
+        pld_status=_freshness_status(pld_last_date, today),
+        next_run=proxima.strftime("%d/%m") + " 09:15 BRT",
+    )
+
     html = Template(HTML_TEMPLATE).render(
         met_m=met_m, met_b=met_b,
         n_grupos=len(grupos), grupos_str=grupos_str,
         submercado=pld_sub, periodo=periodo,
         gerado_em=today.strftime("%d/%m/%Y"),
+        dash_version=DASH_VERSION,
+        dash_version_date=DASH_VERSION_DATE,
+        dash_changes=DASH_CHANGES,
+        freshness=freshness_data,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
