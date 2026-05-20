@@ -306,6 +306,98 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .anom-note strong{color:var(--ink-2);font-style:normal}
 @media (max-width:720px){.anom-summary{grid-template-columns:repeat(2,1fr)}}
 
+/* ===== ONDA 3.1: Probabilistic forecast (P10/P50/P90) ===== */
+.proba-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.proba-bar-container{margin:16px 0 24px}
+.proba-bar-track{position:relative;height:32px;background:var(--bg-alt);
+  border-radius:4px;overflow:hidden}
+.proba-bar-band{position:absolute;top:0;bottom:0;
+  background:linear-gradient(to right,
+    rgba(213,114,85,0.15),rgba(168,68,47,0.3),rgba(45,90,61,0.15))}
+.proba-bar-realized{position:absolute;top:0;bottom:0;
+  background:linear-gradient(to right,#5a5147,#857d72)}
+.proba-bar-marker{position:absolute;top:-4px;bottom:-4px;width:2px;
+  background:var(--ink)}
+.proba-bar-marker.p10{background:var(--accent-today)}
+.proba-bar-marker.p50{background:var(--ink);width:3px}
+.proba-bar-marker.p90{background:var(--ok)}
+.proba-bar-labels{display:flex;justify-content:space-between;
+  margin-top:8px;font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace}
+.proba-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
+  margin:24px 0 16px}
+.proba-cell{background:var(--bg-alt);padding:18px;border-radius:3px;
+  border-left:4px solid var(--rule);text-align:center}
+.proba-cell.pess{border-left-color:var(--accent-today)}
+.proba-cell.central{border-left-color:var(--ink);background:var(--panel);
+  border:2px solid var(--ink);padding:17px}
+.proba-cell.opt{border-left-color:var(--ok)}
+.proba-pct{font-size:10px;color:var(--muted);letter-spacing:0.16em;
+  text-transform:uppercase;font-weight:700;
+  font-family:'IBM Plex Mono',monospace;margin-bottom:6px}
+.proba-cell.pess .proba-pct{color:var(--accent-today)}
+.proba-cell.opt .proba-pct{color:var(--ok)}
+.proba-val{font-family:'Fraunces',Georgia,serif;font-size:28px;
+  font-weight:500;color:var(--ink);line-height:1}
+.proba-val .unit{font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+.proba-tiny{font-size:10px;color:var(--muted);letter-spacing:0.06em;
+  margin-top:8px;line-height:1.3}
+.proba-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-size:11px;color:var(--ink-2);padding:10px 14px;
+  background:var(--bg-alt);border-radius:2px;
+  font-family:'IBM Plex Mono',monospace}
+.proba-meta strong{color:var(--ink);letter-spacing:0.06em;
+  text-transform:uppercase;font-size:9px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.proba-prose{margin-top:14px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;padding-top:12px;border-top:1px solid var(--border)}
+@media (max-width:720px){.proba-grid{grid-template-columns:1fr;gap:10px}}
+
+/* ===== ONDA 3.2: 3 Scenarios (Optimistic/Base/Pessimistic) ===== */
+.cen-grid{display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:16px;
+  margin:24px 0 16px}
+.cen-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:10px}
+.cen-card.cen-opt{border-top:3px solid var(--ok)}
+.cen-card.cen-base{border:2px solid var(--accent);
+  box-shadow:0 4px 16px rgba(168,68,47,0.08)}
+.cen-card.cen-pess{border-top:3px solid var(--accent-today)}
+.cen-header{display:flex;gap:12px;align-items:flex-start;
+  padding-bottom:10px;border-bottom:1px solid var(--border)}
+.cen-emoji{font-size:24px;line-height:1}
+.cen-label{font-size:13px;color:var(--ink);font-weight:600;
+  letter-spacing:0.04em;margin-bottom:2px}
+.cen-tiny{font-size:10px;color:var(--muted);letter-spacing:0.04em;
+  line-height:1.4;font-family:'IBM Plex Mono',monospace}
+.cen-mwh{font-family:'Fraunces',Georgia,serif;font-size:30px;
+  font-weight:500;color:var(--ink);line-height:1;margin-top:4px}
+.cen-rs{font-family:'Fraunces',Georgia,serif;font-size:24px;
+  color:var(--accent);font-weight:500;line-height:1}
+.cen-rs .unit, .cen-mwh .unit{font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+.cen-delta{font-size:11px;font-family:'IBM Plex Mono',monospace;
+  padding:8px 10px;background:var(--bg-alt);border-radius:2px;
+  margin-top:auto;color:var(--ink-2);font-weight:500}
+.cen-delta.pos{color:var(--ok);background:#dff5e8}
+.cen-delta.neg{color:var(--accent-today);background:#fce4e0}
+.cen-delta.neutral{text-align:center;color:var(--muted)}
+.cen-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-size:11px;color:var(--ink-2);padding:10px 14px;
+  background:var(--bg-alt);border-radius:2px;margin:12px 0;
+  font-family:'IBM Plex Mono',monospace}
+.cen-meta strong{color:var(--ink);letter-spacing:0.06em;
+  text-transform:uppercase;font-size:9px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.cen-prose{font-size:13px;color:var(--ink-2);line-height:1.6;
+  padding:14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;margin:12px 0}
+.cen-prose strong{color:var(--ink)}
+.cen-spread{font-family:'IBM Plex Mono',monospace;color:var(--accent);
+  font-weight:600;margin:0 6px}
+@media (max-width:840px){.cen-grid{grid-template-columns:1fr;gap:12px}}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -2327,6 +2419,169 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
     
 
+    <!-- ========================================================= -->
+    <!-- ONDA 3.1: Forecast probabilistico P10/P50/P90              -->
+    <!-- ========================================================= -->
+    
+    <div class="section-head">
+      <span class="num">IX.</span>
+      <h3 data-i18n="proba_title">Probabilistic forecast · P10 / P50 / P90</h3>
+      <span class="tag" data-i18n="proba_tag">STATISTICAL BANDS</span>
+    </div>
+    <p class="section-desc" data-i18n="proba_desc">
+      Instead of a single point estimate, shows the projected total generation
+      with statistical confidence bands. Based on the variance of daily
+      generation over the last 30 days. P10 is
+      the pessimistic case (only 10% of outcomes would be lower); P50 is
+      median; P90 is optimistic. Useful for risk-aware planning.
+    </p>
+
+    <div class="proba-card">
+      <div class="proba-bar-container">
+        <div class="proba-bar-track">
+          
+          
+          
+          
+          
+            
+            
+            
+            <div class="proba-bar-band" style="left:90.4%;right:0"></div>
+            <div class="proba-bar-marker p10" style="left:90.4%"></div>
+            <div class="proba-bar-marker p50" style="left:95.2%"></div>
+            <div class="proba-bar-marker p90" style="left:100%"></div>
+            <div class="proba-bar-realized" style="left:0;right:41.5%"></div>
+          
+        </div>
+        <div class="proba-bar-labels">
+          <div class="proba-lbl-l">30658 MWh<br><small data-i18n="proba_realized">realized</small></div>
+          <div class="proba-lbl-r">52424 MWh</div>
+        </div>
+      </div>
+
+      <div class="proba-grid">
+        <div class="proba-cell pess">
+          <div class="proba-pct">P10</div>
+          <div class="proba-val">47376<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_pessimistic">Pessimistic (10% chance lower)</div>
+        </div>
+        <div class="proba-cell central">
+          <div class="proba-pct">P50</div>
+          <div class="proba-val">49900<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_central">Central (median estimate)</div>
+        </div>
+        <div class="proba-cell opt">
+          <div class="proba-pct">P90</div>
+          <div class="proba-val">52424<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_optimistic">Optimistic (90% chance lower)</div>
+        </div>
+      </div>
+
+      <div class="proba-meta">
+        <span><strong data-i18n="proba_daily_mean">Daily mean</strong>: 1603.5 MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_daily_std">Daily σ</strong>: 568.5 MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_total_sigma">Total σ (12 days)</strong>: 1969.2 MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_lookback">Lookback</strong>: 30 days</span>
+      </div>
+
+      <p class="proba-prose">
+        
+        
+          <span data-i18n="proba_med_var">Moderate variability — typical for solar plants. P10–P90 range is 10% of median.</span>
+        
+      </p>
+    </div>
+    
+
+    <!-- ========================================================= -->
+    <!-- ONDA 3.2: 3 Cenarios (Otimista/Base/Pessimista)            -->
+    <!-- ========================================================= -->
+    
+    
+    
+    
+    <div class="section-head">
+      <span class="num">X.</span>
+      <h3 data-i18n="cen_title">Scenario forecast · Optimistic / Base / Pessimistic</h3>
+      <span class="tag" data-i18n="cen_tag">HYPOTHESIS-BASED</span>
+    </div>
+    <p class="section-desc" data-i18n="cen_desc">
+      Unlike the P10/P50/P90 statistical bands above, these scenarios apply
+      explicit assumptions on operational variables: curtailment trend, solar
+      irradiance (GHI), and unplanned maintenance days. Useful for stress-testing
+      financial decisions and planning operational responses.
+    </p>
+
+    <div class="cen-grid">
+      <!-- OTIMISTA -->
+      <div class="cen-card cen-opt">
+        <div class="cen-header">
+          <div class="cen-emoji">📈</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_optimistic">Optimistic</div>
+            <div class="cen-tiny" data-i18n="cen_opt_hyp">curt −30% · GHI +5% · 0 maint days</div>
+          </div>
+        </div>
+        <div class="cen-mwh">52581<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ 4.63<span class="unit">M</span></div>
+        <div class="cen-delta pos">
+          +5.1% vs Base
+          (R$ +0.23M)
+        </div>
+      </div>
+
+      <!-- BASE (destacado) -->
+      <div class="cen-card cen-base">
+        <div class="cen-header">
+          <div class="cen-emoji">📊</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_base">Base <small style="font-weight:400">[current trend]</small></div>
+            <div class="cen-tiny" data-i18n="cen_base_hyp">curt 26% (atual) · GHI as-is</div>
+          </div>
+        </div>
+        <div class="cen-mwh">50021<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ 4.41<span class="unit">M</span></div>
+        <div class="cen-delta neutral">— <span data-i18n="cen_reference">reference</span> —</div>
+      </div>
+
+      <!-- PESSIMISTA -->
+      <div class="cen-card cen-pess">
+        <div class="cen-header">
+          <div class="cen-emoji">📉</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_pessimistic">Pessimistic</div>
+            <div class="cen-tiny" data-i18n="cen_pess_hyp">curt +20% · GHI −5% · 2 maint days</div>
+          </div>
+        </div>
+        <div class="cen-mwh">45187<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ 3.98<span class="unit">M</span></div>
+        <div class="cen-delta neg">
+          -9.7% vs Base
+          (R$ -0.43M)
+        </div>
+      </div>
+    </div>
+
+    <div class="cen-meta">
+      <span><strong data-i18n="cen_pld_used">PLD effective used (MTD)</strong>: R$ 88/MWh</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="cen_curt_atual">Current curtailment</strong>: 26.1%</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="cen_days">Days remaining</strong>: 12</span>
+    </div>
+
+    <p class="cen-prose">
+      <strong data-i18n="cen_spread_title">Total spread (Optimistic − Pessimistic):</strong>
+      <span class="cen-spread">7394 MWh ·
+        R$ 0.65M</span>
+      <span data-i18n="cen_spread_desc">— the operational range you should plan for.</span>
+    </p>
+    
+
 
     <div class="bignum">
       <div class="figure">
@@ -3402,13 +3657,15 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       </div>
       <div class="version-info">
         <span data-i18n="cred_version">Version</span>:
-        <code>v5.10</code>
+        <code>v5.11</code>
         <span data-i18n="cred_released">released</span> 2026-05-19
         <span class="changelog-toggle" onclick="toggleChangelog()">
           [<span data-i18n="cred_changelog">changelog</span>]
         </span>
       </div>
       <ul class="changelog-list" id="changelog-list" style="display:none">
+        
+        <li>v5.11 (2026-05-19): Onda 3 - Forecast probabilistico P10/P50/P90 + 3 cenarios (Otimista/Base/Pessimista)</li>
         
         <li>v5.10 (2026-05-19): Onda 2B - Heatmap perda R$, Modulation Alpha (Mauriti vs NE), deteccao anomalia geracao</li>
         
@@ -3421,8 +3678,6 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
         <li>v5.6 (2026-05-17): Monthly forecast (CCEE View + Commercial + 3 cards)</li>
         
         <li>v5.5 (2026-05-15): Tracker upgrades + Benchmark v2 multi-select</li>
-        
-        <li>v5.4 (2026-05-13): Cron diario + Solar fix + 2 PPAs</li>
         
       </ul>
     </div>
@@ -3851,7 +4106,38 @@ const I18N = {
     anom_th_curt: "Curtailment (MWh)",
     anom_th_gap: "Gap (%)",
     anom_note_title: "Nota:",
-    anom_note_p: "Anomalias são heurísticas — nem todas são problemas reais. Dias com nebulosidade anormal afetando Mauriti diferentemente da região NE podem aparecer aqui. Use como ponto de partida pra investigação operacional."
+    anom_note_p: "Anomalias são heurísticas — nem todas são problemas reais. Dias com nebulosidade anormal afetando Mauriti diferentemente da região NE podem aparecer aqui. Use como ponto de partida pra investigação operacional.",
+    // ===== ONDA 3 =====
+    proba_title: "Forecast probabilístico · P10 / P50 / P90",
+    proba_tag: "BANDAS ESTATÍSTICAS",
+    proba_desc: "Em vez de um único ponto, mostra a projeção total com bandas estatísticas de confiança. Baseado na variância da geração diária dos últimos 30 dias. P10 é o cenário pessimista (apenas 10% dos resultados ficariam abaixo); P50 é mediana; P90 é otimista. Útil pra planejamento sensível a risco.",
+    proba_realized: "realizado",
+    proba_pessimistic: "Pessimista (10% chance de ficar abaixo)",
+    proba_central: "Central (estimativa mediana)",
+    proba_optimistic: "Otimista (90% chance de ficar abaixo)",
+    proba_daily_mean: "Média diária",
+    proba_daily_std: "σ diário",
+    proba_total_sigma: "σ total",
+    proba_lookback: "Janela",
+    proba_low_var: "Baixa variabilidade — projeção estatisticamente estável. Faixa P10–P90 é apenas",
+    proba_med_var: "Variabilidade moderada — típica de usinas solares. Faixa P10–P90 é",
+    proba_high_var: "Alta variabilidade",
+    proba_high_var_p: "— faixa P10–P90 é grande indicando incerteza significativa. Os últimos dias tiveram oscilações incomuns dia-a-dia.",
+    cen_title: "Forecast por cenário · Otimista / Base / Pessimista",
+    cen_tag: "BASEADO EM HIPÓTESES",
+    cen_desc: "Diferente das bandas P10/P50/P90 acima, esses cenários aplicam hipóteses explícitas sobre variáveis operacionais: tendência de curtailment, irradiância solar (GHI), e dias de manutenção não-planejada. Útil pra stress-test de decisões financeiras e planejamento de respostas operacionais.",
+    cen_optimistic: "Otimista",
+    cen_base: "Base",
+    cen_pessimistic: "Pessimista",
+    cen_opt_hyp: "curt −30% · GHI +5% · 0 dias manut",
+    cen_base_hyp: "curt atual · GHI atual",
+    cen_pess_hyp: "curt +20% · GHI −5% · 2 dias manut",
+    cen_reference: "referência",
+    cen_pld_used: "PLD efetivo usado (MTD)",
+    cen_curt_atual: "Curtailment atual",
+    cen_days: "Dias restantes",
+    cen_spread_title: "Spread total (Otimista − Pessimista):",
+    cen_spread_desc: "— a faixa operacional que você deve planejar."
   }
 };
 
