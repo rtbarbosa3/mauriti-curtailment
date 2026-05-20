@@ -60,9 +60,11 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.10"
+DASH_VERSION = "5.11"
 DASH_VERSION_DATE = "2026-05-19"
 DASH_CHANGES = [
+    "v5.11 (2026-05-19): Onda 3 - Forecast probabilistico P10/P50/P90 + "
+    "3 cenarios (Otimista/Base/Pessimista)",
     "v5.10 (2026-05-19): Onda 2B - Heatmap perda R$, Modulation Alpha "
     "(Mauriti vs NE), deteccao anomalia geracao",
     "v5.9 (2026-05-19): Onda 2A - YoY modulation, In/Out-the-money, "
@@ -72,7 +74,6 @@ DASH_CHANGES = [
     "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
     "v5.6 (2026-05-17): Monthly forecast (CCEE View + Commercial + 3 cards)",
     "v5.5 (2026-05-15): Tracker upgrades + Benchmark v2 multi-select",
-    "v5.4 (2026-05-13): Cron diario + Solar fix + 2 PPAs",
 ]
 
 CONFIG: dict[str, Any] = {
@@ -1796,6 +1797,200 @@ def detectar_anomalias_geracao(hor_m: pd.DataFrame, mauriti_df: pd.DataFrame,
     )
 
 
+# =============================================================================
+#  ONDA 3: Forecast probabilistico (P10/P50/P90) + 3 cenarios
+# =============================================================================
+
+def calcular_forecast_probabilistico(diario_m: pd.DataFrame, cur_first: date,
+                                          today: date, days_total: int,
+                                          lookback_dias: int = 30) -> dict:
+    """Forecast probabilistico de geracao mensal com bandas P10/P50/P90.
+
+    Metodo B: rolling window dos ultimos N dias.
+    - Calcula media e std dev da geracao diaria dos ultimos lookback_dias
+    - Projeta os dias restantes do mes usando essa distribuicao
+    - Bandas: P10 = mean - 1.28*sigma, P50 = mean, P90 = mean + 1.28*sigma
+      (multiplica por dias_restantes; sigma do total ~ sqrt(N)*sigma_dia
+      assumindo dias independentes)
+
+    Returns dict with:
+      vazio: bool
+      mwh_realized: float
+      mwh_proj_p10, mwh_proj_p50, mwh_proj_p90: float (so dos dias restantes)
+      mwh_total_p10, mwh_total_p50, mwh_total_p90: float (total mes)
+      daily_mean, daily_std: float
+      lookback_dias: int
+      days_remaining: int
+      sigma_total: float  (incerteza acumulada do total)
+    """
+    if diario_m.empty:
+        return {"vazio": True}
+
+    df = diario_m.copy()
+    df["dia_dt"] = pd.to_datetime(df["dia"]).dt.date
+
+    # Mes corrente parcial - ja realizado
+    cur_m = df[(df["dia_dt"] >= cur_first) & (df["dia_dt"] <= today)].copy()
+    if cur_m.empty:
+        return {"vazio": True}
+
+    mwh_realized = float(cur_m["mwh_dia"].sum())
+    days_elapsed = int(len(cur_m))
+    days_remaining = max(days_total - days_elapsed, 0)
+
+    if days_remaining == 0:
+        # Mes ja completo - sem projecao
+        return dict(
+            vazio=False,
+            mwh_realized=mwh_realized,
+            mwh_proj_p10=0.0, mwh_proj_p50=0.0, mwh_proj_p90=0.0,
+            mwh_total_p10=mwh_realized, mwh_total_p50=mwh_realized,
+            mwh_total_p90=mwh_realized,
+            daily_mean=0.0, daily_std=0.0,
+            lookback_dias=lookback_dias, days_remaining=0,
+            sigma_total=0.0,
+        )
+
+    # Pega ultimos N dias com dado (incluindo mes corrente parcial)
+    cutoff = today - timedelta(days=lookback_dias)
+    lookback_df = df[df["dia_dt"] > cutoff].copy()
+    if lookback_df.empty or len(lookback_df) < 5:
+        # Fallback: usa todos os dias disponiveis (so se pouco dado)
+        lookback_df = df.copy()
+
+    daily_vals = lookback_df["mwh_dia"].values
+    daily_mean = float(np.mean(daily_vals))
+    daily_std = float(np.std(daily_vals, ddof=1)) if len(daily_vals) > 1 else 0.0
+
+    # Projecao P50 = media * dias_restantes
+    mwh_proj_p50 = daily_mean * days_remaining
+
+    # Incerteza acumulada: sigma_total = sqrt(N) * sigma_dia
+    # (variancia da soma de N variaveis i.i.d. = N * variancia)
+    sigma_total = (days_remaining ** 0.5) * daily_std
+
+    # P10/P90 com z=1.28 (intervalo de 80% de confianca)
+    z = 1.2816  # P10 (10th percentile) e P90 (90th percentile)
+    mwh_proj_p10 = max(0, mwh_proj_p50 - z * sigma_total)
+    mwh_proj_p90 = mwh_proj_p50 + z * sigma_total
+
+    return dict(
+        vazio=False,
+        mwh_realized=mwh_realized,
+        mwh_proj_p10=mwh_proj_p10,
+        mwh_proj_p50=mwh_proj_p50,
+        mwh_proj_p90=mwh_proj_p90,
+        mwh_total_p10=mwh_realized + mwh_proj_p10,
+        mwh_total_p50=mwh_realized + mwh_proj_p50,
+        mwh_total_p90=mwh_realized + mwh_proj_p90,
+        daily_mean=daily_mean,
+        daily_std=daily_std,
+        lookback_dias=lookback_dias,
+        days_remaining=days_remaining,
+        sigma_total=sigma_total,
+        z_score=z,
+        # P-percentil acumulado em dias_proj (pra display)
+        days_elapsed=days_elapsed,
+    )
+
+
+def calcular_3_cenarios(diario_m: pd.DataFrame, mauriti_df: pd.DataFrame,
+                            cur_first: date, today: date, days_total: int,
+                            pld_efetivo: float) -> dict:
+    """3 cenarios de forecast com hipoteses explicitas de mercado/operacao.
+
+    - Otimista: curtailment -30%, GHI +5%, 0 dias manutencao
+    - Base: tendencia atual (mesmo P50 do forecast probabilistico)
+    - Pessimista: curtailment +20%, GHI -5%, 2 dias manutencao
+
+    Returns dict com 3 cenarios, cada um com:
+      label, mwh_total, receita_rs, mwh_delta_vs_base, receita_delta_vs_base
+    """
+    if diario_m.empty:
+        return {"vazio": True}
+
+    df = diario_m.copy()
+    df["dia_dt"] = pd.to_datetime(df["dia"]).dt.date
+    cur_m = df[(df["dia_dt"] >= cur_first) & (df["dia_dt"] <= today)].copy()
+    if cur_m.empty:
+        return {"vazio": True}
+
+    mwh_realized = float(cur_m["mwh_dia"].sum())
+    days_elapsed = int(len(cur_m))
+    days_remaining = max(days_total - days_elapsed, 0)
+    daily_avg_realized = mwh_realized / max(days_elapsed, 1)
+
+    # Receita realizada no mes (com PLD efetivo Mauriti)
+    receita_realized = float(cur_m["receita_real"].sum())
+    pld_eff_mtd = receita_realized / mwh_realized if mwh_realized > 0 else pld_efetivo
+
+    # Curtailment atual: % da geracao teorica perdida
+    # Proxy: curtailment_mwh / (mwh_realized + curtailment_mwh)
+    curt_atual_mwh = 0.0
+    if not mauriti_df.empty and "curtailment_mwh" in mauriti_df.columns:
+        m_df = mauriti_df.copy()
+        m_df["data"] = m_df["din_instante"].dt.date
+        curt_m = m_df[(m_df["data"] >= cur_first) & (m_df["data"] <= today)]
+        curt_atual_mwh = float(curt_m["curtailment_mwh"].sum())
+    gen_teorica = mwh_realized + curt_atual_mwh
+    pct_curt_atual = curt_atual_mwh / gen_teorica if gen_teorica > 0 else 0.0
+
+    def _cenario(label, mult_curt, mult_ghi, dias_manut, key):
+        """Calcula 1 cenario. Multiplicadores aplicados sobre o RESTANTE."""
+        # Ajusta GHI (mais sol = mais gen pre-curtailment)
+        daily_pre_curt = daily_avg_realized * mult_ghi
+        # Ajusta curtailment (mais curt = menos gen liquida)
+        novo_pct_curt = pct_curt_atual * mult_curt
+        novo_pct_curt = max(0, min(0.5, novo_pct_curt))  # limita 0-50%
+        daily_liquido = daily_pre_curt * (1 - (novo_pct_curt - pct_curt_atual))
+        # Aplica dias de manutencao (geracao zero)
+        dias_efetivos = max(0, days_remaining - dias_manut)
+        mwh_proj_restante = daily_liquido * dias_efetivos
+        mwh_total = mwh_realized + mwh_proj_restante
+        # Receita: PLD efetivo histórico × MWh total
+        receita_total = mwh_total * pld_eff_mtd
+        return dict(
+            label=label,
+            key=key,
+            mwh_total=mwh_total,
+            receita_total=receita_total,
+            mwh_restante=mwh_proj_restante,
+            dias_efetivos=dias_efetivos,
+            dias_manut=dias_manut,
+            mult_curt=mult_curt,
+            mult_ghi=mult_ghi,
+            novo_pct_curt=novo_pct_curt * 100,
+        )
+
+    cenario_base = _cenario("Base", 1.0, 1.0, 0, "base")
+    cenario_opt = _cenario("Optimistic", 0.70, 1.05, 0, "opt")
+    cenario_pess = _cenario("Pessimistic", 1.20, 0.95, 2, "pess")
+
+    # Deltas vs Base
+    for c in [cenario_opt, cenario_pess]:
+        c["mwh_delta"] = c["mwh_total"] - cenario_base["mwh_total"]
+        c["mwh_delta_pct"] = (100 * c["mwh_delta"] / cenario_base["mwh_total"]
+                               if cenario_base["mwh_total"] > 0 else 0)
+        c["receita_delta"] = c["receita_total"] - cenario_base["receita_total"]
+        c["receita_delta_pct"] = (100 * c["receita_delta"] /
+                                    cenario_base["receita_total"]
+                                    if cenario_base["receita_total"] > 0 else 0)
+    cenario_base["mwh_delta"] = 0
+    cenario_base["mwh_delta_pct"] = 0
+    cenario_base["receita_delta"] = 0
+    cenario_base["receita_delta_pct"] = 0
+
+    return dict(
+        vazio=False,
+        cenarios=dict(opt=cenario_opt, base=cenario_base, pess=cenario_pess),
+        pct_curt_atual=pct_curt_atual * 100,
+        pld_eff_mtd=pld_eff_mtd,
+        mwh_realized=mwh_realized,
+        days_elapsed=days_elapsed,
+        days_remaining=days_remaining,
+    )
+
+
 
 
 def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
@@ -3414,6 +3609,98 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   margin:14px 0;font-style:italic}
 .anom-note strong{color:var(--ink-2);font-style:normal}
 @media (max-width:720px){.anom-summary{grid-template-columns:repeat(2,1fr)}}
+
+/* ===== ONDA 3.1: Probabilistic forecast (P10/P50/P90) ===== */
+.proba-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.proba-bar-container{margin:16px 0 24px}
+.proba-bar-track{position:relative;height:32px;background:var(--bg-alt);
+  border-radius:4px;overflow:hidden}
+.proba-bar-band{position:absolute;top:0;bottom:0;
+  background:linear-gradient(to right,
+    rgba(213,114,85,0.15),rgba(168,68,47,0.3),rgba(45,90,61,0.15))}
+.proba-bar-realized{position:absolute;top:0;bottom:0;
+  background:linear-gradient(to right,#5a5147,#857d72)}
+.proba-bar-marker{position:absolute;top:-4px;bottom:-4px;width:2px;
+  background:var(--ink)}
+.proba-bar-marker.p10{background:var(--accent-today)}
+.proba-bar-marker.p50{background:var(--ink);width:3px}
+.proba-bar-marker.p90{background:var(--ok)}
+.proba-bar-labels{display:flex;justify-content:space-between;
+  margin-top:8px;font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace}
+.proba-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
+  margin:24px 0 16px}
+.proba-cell{background:var(--bg-alt);padding:18px;border-radius:3px;
+  border-left:4px solid var(--rule);text-align:center}
+.proba-cell.pess{border-left-color:var(--accent-today)}
+.proba-cell.central{border-left-color:var(--ink);background:var(--panel);
+  border:2px solid var(--ink);padding:17px}
+.proba-cell.opt{border-left-color:var(--ok)}
+.proba-pct{font-size:10px;color:var(--muted);letter-spacing:0.16em;
+  text-transform:uppercase;font-weight:700;
+  font-family:'IBM Plex Mono',monospace;margin-bottom:6px}
+.proba-cell.pess .proba-pct{color:var(--accent-today)}
+.proba-cell.opt .proba-pct{color:var(--ok)}
+.proba-val{font-family:'Fraunces',Georgia,serif;font-size:28px;
+  font-weight:500;color:var(--ink);line-height:1}
+.proba-val .unit{font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+.proba-tiny{font-size:10px;color:var(--muted);letter-spacing:0.06em;
+  margin-top:8px;line-height:1.3}
+.proba-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-size:11px;color:var(--ink-2);padding:10px 14px;
+  background:var(--bg-alt);border-radius:2px;
+  font-family:'IBM Plex Mono',monospace}
+.proba-meta strong{color:var(--ink);letter-spacing:0.06em;
+  text-transform:uppercase;font-size:9px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.proba-prose{margin-top:14px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;padding-top:12px;border-top:1px solid var(--border)}
+@media (max-width:720px){.proba-grid{grid-template-columns:1fr;gap:10px}}
+
+/* ===== ONDA 3.2: 3 Scenarios (Optimistic/Base/Pessimistic) ===== */
+.cen-grid{display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:16px;
+  margin:24px 0 16px}
+.cen-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:20px;display:flex;flex-direction:column;gap:10px}
+.cen-card.cen-opt{border-top:3px solid var(--ok)}
+.cen-card.cen-base{border:2px solid var(--accent);
+  box-shadow:0 4px 16px rgba(168,68,47,0.08)}
+.cen-card.cen-pess{border-top:3px solid var(--accent-today)}
+.cen-header{display:flex;gap:12px;align-items:flex-start;
+  padding-bottom:10px;border-bottom:1px solid var(--border)}
+.cen-emoji{font-size:24px;line-height:1}
+.cen-label{font-size:13px;color:var(--ink);font-weight:600;
+  letter-spacing:0.04em;margin-bottom:2px}
+.cen-tiny{font-size:10px;color:var(--muted);letter-spacing:0.04em;
+  line-height:1.4;font-family:'IBM Plex Mono',monospace}
+.cen-mwh{font-family:'Fraunces',Georgia,serif;font-size:30px;
+  font-weight:500;color:var(--ink);line-height:1;margin-top:4px}
+.cen-rs{font-family:'Fraunces',Georgia,serif;font-size:24px;
+  color:var(--accent);font-weight:500;line-height:1}
+.cen-rs .unit, .cen-mwh .unit{font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+.cen-delta{font-size:11px;font-family:'IBM Plex Mono',monospace;
+  padding:8px 10px;background:var(--bg-alt);border-radius:2px;
+  margin-top:auto;color:var(--ink-2);font-weight:500}
+.cen-delta.pos{color:var(--ok);background:#dff5e8}
+.cen-delta.neg{color:var(--accent-today);background:#fce4e0}
+.cen-delta.neutral{text-align:center;color:var(--muted)}
+.cen-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-size:11px;color:var(--ink-2);padding:10px 14px;
+  background:var(--bg-alt);border-radius:2px;margin:12px 0;
+  font-family:'IBM Plex Mono',monospace}
+.cen-meta strong{color:var(--ink);letter-spacing:0.06em;
+  text-transform:uppercase;font-size:9px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.cen-prose{font-size:13px;color:var(--ink-2);line-height:1.6;
+  padding:14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;margin:12px 0}
+.cen-prose strong{color:var(--ink)}
+.cen-spread{font-family:'IBM Plex Mono',monospace;color:var(--accent);
+  font-weight:600;margin:0 6px}
+@media (max-width:840px){.cen-grid{grid-template-columns:1fr;gap:12px}}
 
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
@@ -5165,6 +5452,174 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
     {% endif %}
 
+    <!-- ========================================================= -->
+    <!-- ONDA 3.1: Forecast probabilistico P10/P50/P90              -->
+    <!-- ========================================================= -->
+    {% if forecast_proba and not forecast_proba.vazio %}
+    <div class="section-head">
+      <span class="num">IX.</span>
+      <h3 data-i18n="proba_title">Probabilistic forecast · P10 / P50 / P90</h3>
+      <span class="tag" data-i18n="proba_tag">STATISTICAL BANDS</span>
+    </div>
+    <p class="section-desc" data-i18n="proba_desc">
+      Instead of a single point estimate, shows the projected total generation
+      with statistical confidence bands. Based on the variance of daily
+      generation over the last {{ forecast_proba.lookback_dias }} days. P10 is
+      the pessimistic case (only 10% of outcomes would be lower); P50 is
+      median; P90 is optimistic. Useful for risk-aware planning.
+    </p>
+
+    <div class="proba-card">
+      <div class="proba-bar-container">
+        <div class="proba-bar-track">
+          {% set total_p90 = forecast_proba.mwh_total_p90 %}
+          {% set total_p10 = forecast_proba.mwh_total_p10 %}
+          {% set total_p50 = forecast_proba.mwh_total_p50 %}
+          {% set total_realized = forecast_proba.mwh_realized %}
+          {% if total_p90 > 0 %}
+            {% set p10_left = (total_p10 / total_p90) * 100 %}
+            {% set p50_left = (total_p50 / total_p90) * 100 %}
+            {% set realized_left = (total_realized / total_p90) * 100 %}
+            <div class="proba-bar-band" style="left:{{ "%.1f"|format(p10_left) }}%;right:0"></div>
+            <div class="proba-bar-marker p10" style="left:{{ "%.1f"|format(p10_left) }}%"></div>
+            <div class="proba-bar-marker p50" style="left:{{ "%.1f"|format(p50_left) }}%"></div>
+            <div class="proba-bar-marker p90" style="left:100%"></div>
+            <div class="proba-bar-realized" style="left:0;right:{{ "%.1f"|format(100 - realized_left) }}%"></div>
+          {% endif %}
+        </div>
+        <div class="proba-bar-labels">
+          <div class="proba-lbl-l">{{ "%.0f"|format(total_realized) }} MWh<br><small data-i18n="proba_realized">realized</small></div>
+          <div class="proba-lbl-r">{{ "%.0f"|format(total_p90) }} MWh</div>
+        </div>
+      </div>
+
+      <div class="proba-grid">
+        <div class="proba-cell pess">
+          <div class="proba-pct">P10</div>
+          <div class="proba-val">{{ "%.0f"|format(forecast_proba.mwh_total_p10) }}<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_pessimistic">Pessimistic (10% chance lower)</div>
+        </div>
+        <div class="proba-cell central">
+          <div class="proba-pct">P50</div>
+          <div class="proba-val">{{ "%.0f"|format(forecast_proba.mwh_total_p50) }}<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_central">Central (median estimate)</div>
+        </div>
+        <div class="proba-cell opt">
+          <div class="proba-pct">P90</div>
+          <div class="proba-val">{{ "%.0f"|format(forecast_proba.mwh_total_p90) }}<span class="unit">MWh</span></div>
+          <div class="proba-tiny" data-i18n="proba_optimistic">Optimistic (90% chance lower)</div>
+        </div>
+      </div>
+
+      <div class="proba-meta">
+        <span><strong data-i18n="proba_daily_mean">Daily mean</strong>: {{ "%.1f"|format(forecast_proba.daily_mean) }} MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_daily_std">Daily σ</strong>: {{ "%.1f"|format(forecast_proba.daily_std) }} MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_total_sigma">Total σ ({{ forecast_proba.days_remaining }} days)</strong>: {{ "%.1f"|format(forecast_proba.sigma_total) }} MWh</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong data-i18n="proba_lookback">Lookback</strong>: {{ forecast_proba.lookback_dias }} days</span>
+      </div>
+
+      <p class="proba-prose">
+        {% set range_pct = ((forecast_proba.mwh_total_p90 - forecast_proba.mwh_total_p10) / forecast_proba.mwh_total_p50 * 100) if forecast_proba.mwh_total_p50 > 0 else 0 %}
+        {% if range_pct < 10 %}
+          <span data-i18n="proba_low_var">Low variability — the projection is statistically stable. P10–P90 range is only {{ "%.0f"|format(range_pct) }}% of median.</span>
+        {% elif range_pct < 25 %}
+          <span data-i18n="proba_med_var">Moderate variability — typical for solar plants. P10–P90 range is {{ "%.0f"|format(range_pct) }}% of median.</span>
+        {% else %}
+          <strong data-i18n="proba_high_var">High variability</strong>:
+          <span data-i18n="proba_high_var_p">P10–P90 range is {{ "%.0f"|format(range_pct) }}% of median, indicating significant uncertainty. Last {{ forecast_proba.lookback_dias }} days had unusual day-to-day swings.</span>
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+
+    <!-- ========================================================= -->
+    <!-- ONDA 3.2: 3 Cenarios (Otimista/Base/Pessimista)            -->
+    <!-- ========================================================= -->
+    {% if cenarios and not cenarios.vazio %}
+    {% set co = cenarios.cenarios.opt %}
+    {% set cb = cenarios.cenarios.base %}
+    {% set cp = cenarios.cenarios.pess %}
+    <div class="section-head">
+      <span class="num">X.</span>
+      <h3 data-i18n="cen_title">Scenario forecast · Optimistic / Base / Pessimistic</h3>
+      <span class="tag" data-i18n="cen_tag">HYPOTHESIS-BASED</span>
+    </div>
+    <p class="section-desc" data-i18n="cen_desc">
+      Unlike the P10/P50/P90 statistical bands above, these scenarios apply
+      explicit assumptions on operational variables: curtailment trend, solar
+      irradiance (GHI), and unplanned maintenance days. Useful for stress-testing
+      financial decisions and planning operational responses.
+    </p>
+
+    <div class="cen-grid">
+      <!-- OTIMISTA -->
+      <div class="cen-card cen-opt">
+        <div class="cen-header">
+          <div class="cen-emoji">📈</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_optimistic">Optimistic</div>
+            <div class="cen-tiny" data-i18n="cen_opt_hyp">curt −30% · GHI +5% · 0 maint days</div>
+          </div>
+        </div>
+        <div class="cen-mwh">{{ "%.0f"|format(co.mwh_total) }}<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ {{ "%.2f"|format(co.receita_total/1e6) }}<span class="unit">M</span></div>
+        <div class="cen-delta {% if co.mwh_delta > 0 %}pos{% else %}neg{% endif %}">
+          {{ "%+.1f"|format(co.mwh_delta_pct) }}% vs Base
+          (R$ {{ "%+.2f"|format(co.receita_delta/1e6) }}M)
+        </div>
+      </div>
+
+      <!-- BASE (destacado) -->
+      <div class="cen-card cen-base">
+        <div class="cen-header">
+          <div class="cen-emoji">📊</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_base">Base <small style="font-weight:400">[current trend]</small></div>
+            <div class="cen-tiny" data-i18n="cen_base_hyp">curt {{ "%.0f"|format(cenarios.pct_curt_atual) }}% (atual) · GHI as-is</div>
+          </div>
+        </div>
+        <div class="cen-mwh">{{ "%.0f"|format(cb.mwh_total) }}<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ {{ "%.2f"|format(cb.receita_total/1e6) }}<span class="unit">M</span></div>
+        <div class="cen-delta neutral">— <span data-i18n="cen_reference">reference</span> —</div>
+      </div>
+
+      <!-- PESSIMISTA -->
+      <div class="cen-card cen-pess">
+        <div class="cen-header">
+          <div class="cen-emoji">📉</div>
+          <div>
+            <div class="cen-label" data-i18n="cen_pessimistic">Pessimistic</div>
+            <div class="cen-tiny" data-i18n="cen_pess_hyp">curt +20% · GHI −5% · 2 maint days</div>
+          </div>
+        </div>
+        <div class="cen-mwh">{{ "%.0f"|format(cp.mwh_total) }}<span class="unit">MWh</span></div>
+        <div class="cen-rs">R$ {{ "%.2f"|format(cp.receita_total/1e6) }}<span class="unit">M</span></div>
+        <div class="cen-delta {% if cp.mwh_delta > 0 %}pos{% else %}neg{% endif %}">
+          {{ "%+.1f"|format(cp.mwh_delta_pct) }}% vs Base
+          (R$ {{ "%+.2f"|format(cp.receita_delta/1e6) }}M)
+        </div>
+      </div>
+    </div>
+
+    <div class="cen-meta">
+      <span><strong data-i18n="cen_pld_used">PLD effective used (MTD)</strong>: R$ {{ "%.0f"|format(cenarios.pld_eff_mtd) }}/MWh</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="cen_curt_atual">Current curtailment</strong>: {{ "%.1f"|format(cenarios.pct_curt_atual) }}%</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="cen_days">Days remaining</strong>: {{ cenarios.days_remaining }}</span>
+    </div>
+
+    <p class="cen-prose">
+      <strong data-i18n="cen_spread_title">Total spread (Optimistic − Pessimistic):</strong>
+      <span class="cen-spread">{{ "%.0f"|format(co.mwh_total - cp.mwh_total) }} MWh ·
+        R$ {{ "%.2f"|format((co.receita_total - cp.receita_total)/1e6) }}M</span>
+      <span data-i18n="cen_spread_desc">— the operational range you should plan for.</span>
+    </p>
+    {% endif %}
+
 
     <div class="bignum">
       <div class="figure">
@@ -6148,7 +6603,38 @@ const I18N = {
     anom_th_curt: "Curtailment (MWh)",
     anom_th_gap: "Gap (%)",
     anom_note_title: "Nota:",
-    anom_note_p: "Anomalias são heurísticas — nem todas são problemas reais. Dias com nebulosidade anormal afetando Mauriti diferentemente da região NE podem aparecer aqui. Use como ponto de partida pra investigação operacional."
+    anom_note_p: "Anomalias são heurísticas — nem todas são problemas reais. Dias com nebulosidade anormal afetando Mauriti diferentemente da região NE podem aparecer aqui. Use como ponto de partida pra investigação operacional.",
+    // ===== ONDA 3 =====
+    proba_title: "Forecast probabilístico · P10 / P50 / P90",
+    proba_tag: "BANDAS ESTATÍSTICAS",
+    proba_desc: "Em vez de um único ponto, mostra a projeção total com bandas estatísticas de confiança. Baseado na variância da geração diária dos últimos {{ forecast_proba.lookback_dias }} dias. P10 é o cenário pessimista (apenas 10% dos resultados ficariam abaixo); P50 é mediana; P90 é otimista. Útil pra planejamento sensível a risco.",
+    proba_realized: "realizado",
+    proba_pessimistic: "Pessimista (10% chance de ficar abaixo)",
+    proba_central: "Central (estimativa mediana)",
+    proba_optimistic: "Otimista (90% chance de ficar abaixo)",
+    proba_daily_mean: "Média diária",
+    proba_daily_std: "σ diário",
+    proba_total_sigma: "σ total",
+    proba_lookback: "Janela",
+    proba_low_var: "Baixa variabilidade — projeção estatisticamente estável. Faixa P10–P90 é apenas",
+    proba_med_var: "Variabilidade moderada — típica de usinas solares. Faixa P10–P90 é",
+    proba_high_var: "Alta variabilidade",
+    proba_high_var_p: "— faixa P10–P90 é grande indicando incerteza significativa. Os últimos dias tiveram oscilações incomuns dia-a-dia.",
+    cen_title: "Forecast por cenário · Otimista / Base / Pessimista",
+    cen_tag: "BASEADO EM HIPÓTESES",
+    cen_desc: "Diferente das bandas P10/P50/P90 acima, esses cenários aplicam hipóteses explícitas sobre variáveis operacionais: tendência de curtailment, irradiância solar (GHI), e dias de manutenção não-planejada. Útil pra stress-test de decisões financeiras e planejamento de respostas operacionais.",
+    cen_optimistic: "Otimista",
+    cen_base: "Base",
+    cen_pessimistic: "Pessimista",
+    cen_opt_hyp: "curt −30% · GHI +5% · 0 dias manut",
+    cen_base_hyp: "curt atual · GHI atual",
+    cen_pess_hyp: "curt +20% · GHI −5% · 2 dias manut",
+    cen_reference: "referência",
+    cen_pld_used: "PLD efetivo usado (MTD)",
+    cen_curt_atual: "Curtailment atual",
+    cen_days: "Dias restantes",
+    cen_spread_title: "Spread total (Otimista − Pessimista):",
+    cen_spread_desc: "— a faixa operacional que você deve planejar."
   }
 };
 
@@ -7685,6 +8171,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
     # submercado (pra contratos), PLD efetivo Mauriti, e snapshot do dia
     # salvo em forecast_history.json pra comparacao dia-a-dia.
     forecast_data = {"vazio": True}
+    forecast_proba = {"vazio": True}
+    cenarios = {"vazio": True}
     if not cur_m.empty:
         # Dias no mes total e ja decorridos
         if cur_first.month == 12:
@@ -7759,6 +8247,36 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
               f"-> G_projetada={mwh_total_forecast:,.0f} MWh")
         print(f"    PLD MTD por sub: {pld_mtd_por_sub}, "
               f"PLD_eff Mauriti: {pld_efetivo_mauriti:.0f} R$/MWh")
+
+        # ========== ONDA 3.1: Forecast probabilistico P10/P50/P90 ==========
+        forecast_proba = calcular_forecast_probabilistico(
+            diario_m, cur_first, today, days_total_mes, lookback_dias=30)
+        if not forecast_proba.get("vazio"):
+            print(f"[*] Forecast probabilistico (lookback 30d): "
+                  f"P10={forecast_proba['mwh_total_p10']:,.0f} | "
+                  f"P50={forecast_proba['mwh_total_p50']:,.0f} | "
+                  f"P90={forecast_proba['mwh_total_p90']:,.0f} MWh")
+            print(f"    Daily mean={forecast_proba['daily_mean']:.1f}, "
+                  f"std={forecast_proba['daily_std']:.1f}, "
+                  f"sigma_total={forecast_proba['sigma_total']:.1f}")
+
+        # ========== ONDA 3.2: 3 Cenarios (Otimista/Base/Pessimista) ==========
+        cenarios = calcular_3_cenarios(diario_m, mauriti.df, cur_first,
+                                            today, days_total_mes,
+                                            pld_efetivo_mauriti)
+        if not cenarios.get("vazio"):
+            cb = cenarios["cenarios"]["base"]
+            co = cenarios["cenarios"]["opt"]
+            cp = cenarios["cenarios"]["pess"]
+            print(f"[*] 3 cenarios (curt_atual={cenarios['pct_curt_atual']:.1f}%):")
+            print(f"    Otimista:    {co['mwh_total']:,.0f} MWh / "
+                  f"R$ {co['receita_total']/1e6:.2f}M "
+                  f"({co['mwh_delta_pct']:+.1f}%)")
+            print(f"    Base:        {cb['mwh_total']:,.0f} MWh / "
+                  f"R$ {cb['receita_total']/1e6:.2f}M")
+            print(f"    Pessimista:  {cp['mwh_total']:,.0f} MWh / "
+                  f"R$ {cp['receita_total']/1e6:.2f}M "
+                  f"({cp['mwh_delta_pct']:+.1f}%)")
 
         # ===== Persistencia historica do forecast =====
         # Salva snapshot do dia em forecast_history.json (append). Janela
@@ -7980,6 +8498,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         heatmap_loss=heatmap_loss,
         modulation_alpha=alpha_data,
         anomalias=anomalia_data,
+        forecast_proba=forecast_proba,
+        cenarios=cenarios,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
