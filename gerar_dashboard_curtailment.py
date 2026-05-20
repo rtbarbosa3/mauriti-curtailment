@@ -4801,13 +4801,17 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
       <div class="alpha-decomp">
         <div class="alpha-decomp-title" data-i18n="alpha_decomp_title">Gap decomposition</div>
+        {% set gap_abs = modulation_alpha.gap_pp|abs %}
+        {% set timing_abs = modulation_alpha.decomp.timing_pp|abs %}
+        {% set bias_abs = modulation_alpha.decomp.bias_pp|abs %}
+        {% set max_abs = (timing_abs + bias_abs) if (timing_abs + bias_abs) > 0.01 else 1 %}
         <div class="alpha-decomp-row">
           <div class="alpha-decomp-bar-wrap">
             <span class="alpha-decomp-name" data-i18n="alpha_decomp_timing">Solar timing (vs NE mix)</span>
             <div class="alpha-decomp-bar">
-              {% set timing_w = (modulation_alpha.decomp.timing_pp|abs) / (modulation_alpha.gap_pp|abs|float|max(0.01,modulation_alpha.gap_pp|abs)) * 100 %}
+              {% set timing_w = (timing_abs / max_abs) * 100 %}
               <div class="alpha-decomp-fill {% if modulation_alpha.decomp.timing_pp < 0 %}neg{% else %}pos{% endif %}"
-                   style="width:{{ [timing_w, 100]|min }}%"></div>
+                   style="width:{{ "%.0f"|format(timing_w if timing_w < 100 else 100) }}%"></div>
             </div>
           </div>
           <div class="alpha-decomp-val {% if modulation_alpha.decomp.timing_pp < 0 %}neg{% else %}pos{% endif %}">
@@ -4818,9 +4822,9 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
           <div class="alpha-decomp-bar-wrap">
             <span class="alpha-decomp-name" data-i18n="alpha_decomp_bias">Local bias (curtailment, operational, location)</span>
             <div class="alpha-decomp-bar">
-              {% set bias_w = (modulation_alpha.decomp.bias_pp|abs) / (modulation_alpha.gap_pp|abs|float|max(0.01,modulation_alpha.gap_pp|abs)) * 100 %}
+              {% set bias_w = (bias_abs / max_abs) * 100 %}
               <div class="alpha-decomp-fill {% if modulation_alpha.decomp.bias_pp < 0 %}neg{% else %}pos{% endif %}"
-                   style="width:{{ [bias_w, 100]|min }}%"></div>
+                   style="width:{{ "%.0f"|format(bias_w if bias_w < 100 else 100) }}%"></div>
             </div>
           </div>
           <div class="alpha-decomp-val {% if modulation_alpha.decomp.bias_pp < 0 %}neg{% else %}pos{% endif %}">
