@@ -60,9 +60,11 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.9"
+DASH_VERSION = "5.10"
 DASH_VERSION_DATE = "2026-05-19"
 DASH_CHANGES = [
+    "v5.10 (2026-05-19): Onda 2B - Heatmap perda R$, Modulation Alpha "
+    "(Mauriti vs NE), deteccao anomalia geracao",
     "v5.9 (2026-05-19): Onda 2A - YoY modulation, In/Out-the-money, "
     "breakdown REL/CNF/ENE/PAR com periodo + tooltips",
     "v5.8 (2026-05-19): Onda 1 - PLD freshness badge, modo apresentacao, "
@@ -1473,6 +1475,326 @@ def g_donut_curtailment_razao(df_razao: pd.DataFrame) -> go.Figure:
         plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
+
+
+# =============================================================================
+#  ONDA 2B: Heatmap perda financeira, Modulation Alpha, Anomalia
+# =============================================================================
+
+def calcular_heatmap_perda_rs(df_mauriti: pd.DataFrame, cur_first: date,
+                                  today: date) -> dict:
+    """Calcula matriz de perda financeira (R$) por (dia, hora) no mes corrente.
+
+    Returns dict with:
+      vazio: bool
+      dias: list[str]      labels eixo X (e.g. ['01', '02', ...])
+      horas: list[int]     labels eixo Y (0-23)
+      z: list[list[float]] matriz [hora][dia] em R$ (positivo = perda)
+      max_loss: float      maior celula em R$
+      total_loss: float    soma total R$
+      worst_cell: dict     {dia, hora, valor}
+    """
+    if df_mauriti.empty:
+        return {"vazio": True}
+
+    df = df_mauriti.copy()
+    df = df[df["curtailment_mwh"] > 0]
+    if df.empty or "pld" not in df.columns:
+        return {"vazio": True}
+
+    # Filtra mes corrente
+    df["data"] = df["din_instante"].dt.date
+    cur_df = df[(df["data"] >= cur_first) & (df["data"] <= today)].copy()
+    if cur_df.empty:
+        return {"vazio": True}
+
+    # Calcula perda em R$ por linha (curtailment * PLD)
+    cur_df["perd_rs"] = cur_df["curtailment_mwh"] * cur_df["pld"].fillna(0)
+    cur_df["dia_num"] = cur_df["din_instante"].dt.day
+    cur_df["hora_num"] = cur_df["din_instante"].dt.hour
+
+    # Agrega por (dia, hora)
+    pivot = cur_df.groupby(["hora_num", "dia_num"])["perd_rs"].sum().reset_index()
+
+    # Gera matriz completa 24h x dias_decorridos (preenchendo zeros)
+    dias_decorridos = today.day
+    matriz = [[0.0] * dias_decorridos for _ in range(24)]
+    for _, row in pivot.iterrows():
+        h = int(row["hora_num"])
+        d = int(row["dia_num"]) - 1  # 0-indexed
+        if 0 <= h < 24 and 0 <= d < dias_decorridos:
+            matriz[h][d] = float(row["perd_rs"])
+
+    # Encontra pior celula
+    max_val = 0.0
+    worst = {"dia": None, "hora": None, "valor": 0.0}
+    for h in range(24):
+        for d in range(dias_decorridos):
+            if matriz[h][d] > max_val:
+                max_val = matriz[h][d]
+                worst = {"dia": d + 1, "hora": h, "valor": matriz[h][d]}
+
+    total_loss = sum(sum(row) for row in matriz)
+
+    return dict(
+        vazio=False,
+        dias=[f"{d:02d}" for d in range(1, dias_decorridos + 1)],
+        horas=list(range(24)),
+        z=matriz,
+        max_loss=max_val,
+        total_loss=total_loss,
+        worst_cell=worst,
+    )
+
+
+def g_heatmap_perda_rs(data: dict) -> go.Figure:
+    """Gera heatmap de perda R$ por hora do dia x dia do mes."""
+    if data.get("vazio"):
+        return go.Figure()
+
+    # Colorscale: branco -> laranja -> vermelho escuro (terra)
+    colorscale = [
+        [0.0, "#fafaf6"],
+        [0.1, "#fde7e0"],
+        [0.3, "#f5b8a1"],
+        [0.6, "#d57255"],
+        [1.0, "#7a2d1c"],
+    ]
+
+    fig = go.Figure(data=go.Heatmap(
+        z=data["z"],
+        x=data["dias"],
+        y=[f"{h:02d}h" for h in data["horas"]],
+        colorscale=colorscale,
+        zmin=0,
+        hovertemplate="<b>Dia %{x} · %{y}</b><br>" +
+                       "Perda: R$ %{z:,.0f}<extra></extra>",
+        colorbar=dict(
+            title=dict(text="R$ perdidos", side="right",
+                          font=dict(family="IBM Plex Sans", size=11)),
+            tickfont=dict(family="IBM Plex Mono", size=10),
+            len=0.8, thickness=12,
+        ),
+    ))
+
+    fig.update_layout(
+        xaxis=dict(title="Dia do mês", side="bottom",
+                      tickfont=dict(family="IBM Plex Mono", size=10)),
+        yaxis=dict(title="Hora do dia", autorange="reversed",
+                      tickfont=dict(family="IBM Plex Mono", size=10)),
+        font=dict(family="IBM Plex Sans", size=11, color="#1a1715"),
+        margin=dict(t=20, b=40, l=60, r=80),
+        height=460,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def calcular_modulation_alpha(diario_m: pd.DataFrame,
+                                  diario_ne: pd.DataFrame,
+                                  cur_first: date, today: date) -> dict:
+    """Decompose Mauriti vs NE benchmark gap into structural components.
+
+    Returns dict with:
+      vazio: bool
+      mauriti_desconto_pct: float
+      ne_desconto_pct: float
+      gap_pp: float  (negativo se Mauriti pior)
+      gap_abs_rs: float  (perda extra Mauriti em R$)
+      pld_eff_mauriti: float
+      pld_eff_ne: float
+      pld_spot_medio: float
+      decomp: dict  (components)
+    """
+    if diario_m.empty:
+        return {"vazio": True}
+
+    # Garante tipo date (compatibiliza datetime64 e date)
+    df_m_norm = diario_m.copy()
+    df_m_norm["dia_dt"] = pd.to_datetime(df_m_norm["dia"]).dt.date
+
+    # Filtra mes corrente
+    cur_m = df_m_norm[(df_m_norm["dia_dt"] >= cur_first) &
+                          (df_m_norm["dia_dt"] <= today)].copy()
+    if cur_m.empty:
+        return {"vazio": True}
+
+    receita_real_m = cur_m["receita_real"].sum()
+    receita_flat_m = cur_m["receita_flat"].sum()
+    mwh_m = cur_m["mwh_dia"].sum()
+    if receita_flat_m <= 0 or mwh_m <= 0:
+        return {"vazio": True}
+
+    mauriti_pct = 100 * (receita_real_m - receita_flat_m) / receita_flat_m
+    pld_eff_mauriti = receita_real_m / mwh_m
+    pld_spot_medio = receita_flat_m / mwh_m
+
+    # NE benchmark (mes corrente)
+    ne_pct = None
+    pld_eff_ne = None
+    if not diario_ne.empty:
+        df_ne_norm = diario_ne.copy()
+        df_ne_norm["dia_dt"] = pd.to_datetime(df_ne_norm["dia"]).dt.date
+        cur_ne = df_ne_norm[(df_ne_norm["dia_dt"] >= cur_first) &
+                                (df_ne_norm["dia_dt"] <= today)].copy()
+        if not cur_ne.empty:
+            receita_real_ne = cur_ne["receita_real"].sum()
+            receita_flat_ne = cur_ne["receita_flat"].sum()
+            mwh_ne = cur_ne["mwh_dia"].sum()
+            if receita_flat_ne > 0 and mwh_ne > 0:
+                ne_pct = 100 * (receita_real_ne - receita_flat_ne) / receita_flat_ne
+                pld_eff_ne = receita_real_ne / mwh_ne
+
+    if ne_pct is None:
+        return {"vazio": True}
+
+    gap_pp = mauriti_pct - ne_pct  # negativo se Mauriti pior
+    # Perda extra de Mauriti em R$ = (mauriti_pct - ne_pct) * receita_flat_m / 100
+    gap_abs_rs = (gap_pp / 100) * receita_flat_m
+
+    # Decomposicao: 3 componentes
+    # Componente A: TIMING/PERFIL HORARIO
+    #   Quanto da gap eh por Mauriti ser puramente solar vs NE ter mix (eolica + solar)?
+    #   Proxy: (PLD_eff_NE - PLD_eff_Mauriti) eh o premio de timing do NE.
+    #   Como % do PLD spot, expressa em pp.
+    diff_pld_eff = pld_eff_ne - pld_eff_mauriti
+    timing_pp = 100 * diff_pld_eff / pld_spot_medio if pld_spot_medio > 0 else 0
+
+    # Componente B: BIAS RESIDUAL (curtailment + operacional + local)
+    #   Resto que nao foi explicado pelo timing
+    bias_pp = gap_pp - (-timing_pp)
+    # Note: timing_pp eh POSITIVO se NE captura mais valor. Mas o gap_pp negativo
+    # significa Mauriti pior. Logo: -timing_pp eh o "drag" que timing impoe a Mauriti.
+
+    return dict(
+        vazio=False,
+        mauriti_desconto_pct=mauriti_pct,
+        ne_desconto_pct=ne_pct,
+        gap_pp=gap_pp,
+        gap_abs_rs=gap_abs_rs,
+        pld_eff_mauriti=pld_eff_mauriti,
+        pld_eff_ne=pld_eff_ne,
+        pld_spot_medio=pld_spot_medio,
+        decomp=dict(
+            timing_pp=-timing_pp,    # negativo: penalty de Mauriti vs NE
+            bias_pp=bias_pp,         # negativo se Mauriti pior por causa local
+        ),
+    )
+
+
+def detectar_anomalias_geracao(hor_m: pd.DataFrame, mauriti_df: pd.DataFrame,
+                                   ne_horario: pd.DataFrame,
+                                   today: date, lookback_dias: int = 60) -> dict:
+    """Detecta dias com geracao anormalmente baixa SEM curtailment justificavel.
+
+    Algoritmo:
+    1. Pra cada dia D nos ultimos N dias:
+       - gen_real_D = soma Mauriti
+       - curt_D = soma curtailment
+       - gen_esperada_D = baseline derivado de NE (mesma irradiancia regional)
+    2. Calcula gap = gen_esperada_D - (gen_real_D + curt_D)
+    3. Se gap > 15% da esperada: anomalia. Se > 30%: critical.
+
+    Returns dict com:
+      vazio: bool
+      n_dias_analisados: int
+      anomalias: list de dicts (data, gen_real, gen_esperada, curt, gap_pct, severidade)
+      n_warning: int
+      n_critical: int
+    """
+    if hor_m.empty or mauriti_df.empty or ne_horario.empty:
+        return {"vazio": True}
+
+    # Agrega Mauriti horario -> diario
+    df_m = hor_m.copy()
+    df_m["data"] = df_m["hora"].dt.date
+    gen_diario_m = df_m.groupby("data")["mwh"].sum().reset_index()
+    gen_diario_m.columns = ["data", "gen_mauriti"]
+
+    # Curtailment diario Mauriti
+    cdf = mauriti_df.copy()
+    cdf["data"] = cdf["din_instante"].dt.date
+    curt_diario = cdf.groupby("data")["curtailment_mwh"].sum().reset_index()
+    curt_diario.columns = ["data", "curt_mauriti"]
+
+    # Baseline NE: media MWh por usina por dia (proxy de irradiancia regional)
+    # Mauriti tem 9 UFVs; usar gen NE / n_usinas_NE como baseline-por-usina,
+    # e escalar para 9 usinas equivalentes
+    df_ne = ne_horario.copy()
+    df_ne["data"] = df_ne["hora"].dt.date
+    gen_diario_ne = df_ne.groupby("data")["mwh"].sum().reset_index()
+    gen_diario_ne.columns = ["data", "gen_ne"]
+
+    # Junta tudo
+    merged = gen_diario_m.merge(curt_diario, on="data", how="left")
+    merged = merged.merge(gen_diario_ne, on="data", how="left")
+    merged = merged.dropna(subset=["gen_mauriti", "gen_ne"])
+    merged["curt_mauriti"] = merged["curt_mauriti"].fillna(0)
+    if merged.empty:
+        return {"vazio": True}
+
+    # Filtra lookback
+    dt_ini_lookback = today - timedelta(days=lookback_dias)
+    merged = merged[merged["data"] >= dt_ini_lookback].copy()
+    if len(merged) < 10:
+        return {"vazio": True}
+
+    # Calcula ratio Mauriti/NE em dias normais (mediana)
+    # gen_esperada_dia = gen_NE_dia * (ratio_mediano historico)
+    # Pra ser robusto, exclui dias com curtailment alto
+    normal = merged[merged["curt_mauriti"] < merged["gen_mauriti"] * 0.1].copy()
+    if normal.empty or len(normal) < 5:
+        # Fallback: usa todos os dias
+        normal = merged.copy()
+
+    normal["ratio"] = normal["gen_mauriti"] / normal["gen_ne"].replace(0, np.nan)
+    normal = normal.dropna(subset=["ratio"])
+    if normal.empty:
+        return {"vazio": True}
+
+    ratio_baseline = float(normal["ratio"].median())
+
+    # Detecta anomalias em todos os dias do lookback
+    merged["gen_esperada"] = merged["gen_ne"] * ratio_baseline
+    merged["gen_efetiva"] = merged["gen_mauriti"] + merged["curt_mauriti"]
+    merged["gap_mwh"] = merged["gen_esperada"] - merged["gen_efetiva"]
+    merged["gap_pct"] = 100 * merged["gap_mwh"] / merged["gen_esperada"].replace(0, np.nan)
+
+    # Anomalias: gap > 15% sem ser explicado por curtailment
+    anomalias = []
+    for _, r in merged.iterrows():
+        gap_pct = r["gap_pct"]
+        if pd.isna(gap_pct) or gap_pct < 15:
+            continue
+        sev = "critical" if gap_pct > 30 else "warning"
+        anomalias.append(dict(
+            data=r["data"].strftime("%d/%m/%Y"),
+            data_iso=r["data"].isoformat(),
+            gen_real=float(r["gen_mauriti"]),
+            gen_esperada=float(r["gen_esperada"]),
+            curt=float(r["curt_mauriti"]),
+            gap_mwh=float(r["gap_mwh"]),
+            gap_pct=float(gap_pct),
+            severidade=sev,
+        ))
+
+    # Ordena por gap_pct desc
+    anomalias.sort(key=lambda x: x["gap_pct"], reverse=True)
+    n_critical = sum(1 for a in anomalias if a["severidade"] == "critical")
+    n_warning = sum(1 for a in anomalias if a["severidade"] == "warning")
+
+    return dict(
+        vazio=False,
+        n_dias_analisados=int(len(merged)),
+        ratio_baseline=ratio_baseline,
+        lookback_dias=lookback_dias,
+        anomalias=anomalias[:20],  # top 20
+        n_warning=n_warning,
+        n_critical=n_critical,
+        n_total=len(anomalias),
+    )
+
 
 
 
@@ -2986,6 +3308,113 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   .razao-grid{grid-template-columns:1fr}
 }
 
+/* ===== ONDA 2B.1: Heatmap loss stats ===== */
+.heatloss-stats{font-size:12px;color:var(--ink-2);margin:10px 0 16px;
+  padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-family:'IBM Plex Mono',monospace}
+.heatloss-stats strong{color:var(--ink);letter-spacing:0.08em;
+  text-transform:uppercase;font-size:10px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.heatloss-stats .hl-num{color:var(--accent);font-weight:600;margin-left:4px}
+
+/* ===== ONDA 2B.2: Modulation alpha card ===== */
+.tag-neg{background:#fce4e0;color:#a8442f;border-color:#f0c5be}
+.tag-pos{background:#dff5e8;color:#2d5a3d;border-color:#bfe5d0}
+.tag-warn{background:#fff3cd;color:#856404;border-color:#ffeaa7}
+.tag-ok{background:#dff5e8;color:#2d5a3d;border-color:#bfe5d0}
+
+.alpha-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:24px 0}
+.alpha-headline{display:grid;grid-template-columns:1fr auto 1fr 1.4fr;
+  gap:16px;align-items:center;padding-bottom:24px;
+  border-bottom:1px solid var(--border)}
+.alpha-side{text-align:center}
+.alpha-label{font-size:10px;color:var(--muted);letter-spacing:0.14em;
+  text-transform:uppercase;font-weight:600;margin-bottom:6px}
+.alpha-val{font-family:'Fraunces',Georgia,serif;font-size:34px;
+  font-weight:500;color:var(--ink);line-height:1.1}
+.alpha-val.neg{color:var(--accent)}
+.alpha-vs{font-size:14px;color:var(--muted);font-family:'IBM Plex Mono',monospace;
+  letter-spacing:0.1em}
+.alpha-tiny{font-size:11px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;margin-top:4px}
+.alpha-gap{text-align:center;padding-left:20px;border-left:1px solid var(--border)}
+.alpha-gap-val{font-family:'Fraunces',Georgia,serif;font-size:28px;
+  font-weight:500;line-height:1.1}
+.alpha-gap-val.neg{color:var(--accent-today)}
+.alpha-gap-val.pos{color:var(--ok)}
+
+.alpha-decomp{margin-top:20px}
+.alpha-decomp-title{font-size:10px;color:var(--muted);letter-spacing:0.14em;
+  text-transform:uppercase;font-weight:600;margin-bottom:12px}
+.alpha-decomp-row{display:grid;grid-template-columns:1fr 90px;gap:14px;
+  align-items:center;padding:8px 0}
+.alpha-decomp-bar-wrap{display:flex;flex-direction:column;gap:4px}
+.alpha-decomp-name{font-size:12px;color:var(--ink-2)}
+.alpha-decomp-bar{height:8px;background:var(--bg-alt);border-radius:3px;
+  overflow:hidden}
+.alpha-decomp-fill{height:100%;transition:width 0.3s}
+.alpha-decomp-fill.neg{background:linear-gradient(to right,#d57255,#a8442f)}
+.alpha-decomp-fill.pos{background:linear-gradient(to right,#5db978,#2d5a3d)}
+.alpha-decomp-val{font-family:'IBM Plex Mono',monospace;font-size:14px;
+  text-align:right;font-weight:600}
+.alpha-decomp-val.neg{color:var(--accent)}
+.alpha-decomp-val.pos{color:var(--ok)}
+.alpha-prose{margin-top:18px;font-size:13px;color:var(--ink-2);
+  line-height:1.6;border-top:1px solid var(--border);padding-top:14px}
+@media (max-width:720px){
+  .alpha-headline{grid-template-columns:1fr;gap:18px}
+  .alpha-gap{border-left:none;border-top:1px solid var(--border);
+    padding-left:0;padding-top:16px}
+}
+
+/* ===== ONDA 2B.3: Anomalia geração ===== */
+.anom-clean{background:#dff5e8;border:1px solid #bfe5d0;border-radius:4px;
+  padding:20px 24px;margin:24px 0;display:flex;gap:16px;align-items:center}
+.anom-clean-icon{font-size:32px;color:#2d5a3d;font-weight:bold;line-height:1}
+.anom-clean-title{font-size:14px;color:#2d5a3d;font-weight:600;
+  margin-bottom:4px}
+.anom-clean-desc{font-size:12px;color:var(--ink-2);
+  font-family:'IBM Plex Mono',monospace}
+
+.anom-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;
+  margin:24px 0 16px}
+.anom-stat{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:16px;text-align:center}
+.anom-stat-val{font-family:'Fraunces',Georgia,serif;font-size:30px;
+  font-weight:500;color:var(--ink);line-height:1.1}
+.anom-stat-val.crit{color:var(--accent-today)}
+.anom-stat-val.warn{color:var(--warn)}
+.anom-stat-lbl{font-size:10px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;margin-top:6px}
+
+.anom-table{width:100%;border-collapse:collapse;font-size:13px;
+  background:var(--panel);border:1px solid var(--border2);border-radius:4px;
+  margin:16px 0}
+.anom-table th{font-size:10px;color:var(--muted);letter-spacing:0.12em;
+  text-transform:uppercase;font-weight:600;text-align:left;
+  padding:10px 14px;border-bottom:1px solid var(--border2);
+  background:var(--bg-alt)}
+.anom-table th.num{text-align:right}
+.anom-table td{padding:10px 14px;border-bottom:1px solid var(--border);
+  color:var(--ink-2)}
+.anom-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.anom-table tr:last-child td{border-bottom:none}
+.anom-row.anom-critical{background:linear-gradient(to right,
+  rgba(217,46,15,0.06),transparent)}
+.anom-row.anom-warning{background:linear-gradient(to right,
+  rgba(212,160,23,0.06),transparent)}
+.anom-tag{font-size:14px;font-weight:bold}
+.anom-tag.crit{color:var(--accent-today)}
+.anom-tag.warn{color:var(--warn)}
+
+.anom-note{font-size:11px;color:var(--muted);line-height:1.5;
+  padding:10px 14px;background:var(--bg-alt);border-radius:2px;
+  margin:14px 0;font-style:italic}
+.anom-note strong{color:var(--ink-2);font-style:normal}
+@media (max-width:720px){.anom-summary{grid-template-columns:repeat(2,1fr)}}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -3991,6 +4420,33 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
     {% endif %}
 
+    <!-- ========================================================= -->
+    <!-- ONDA 2B.1: Heatmap perda financeira R$ x hora             -->
+    <!-- ========================================================= -->
+    {% if heatmap_loss and not heatmap_loss.vazio %}
+    <div class="section-head">
+      <span class="num">X.</span>
+      <h3 data-i18n="heatloss_title">Financial loss heatmap · current month</h3>
+      <span class="tag" data-i18n="heatloss_tag">R$ × HOUR</span>
+    </div>
+    <p class="section-desc" data-i18n="heatloss_desc">
+      Each cell shows the financial loss in R$ (curtailment MWh × spot PLD)
+      for that specific day and hour of the current month. Reveals when curtailment
+      hurts the most — not just how much.
+    </p>
+
+    <div class="heatloss-stats">
+      <span><strong data-i18n="heatloss_total">Total loss this month</strong>:
+        <span class="hl-num">R$ {{ "%.2f"|format(heatmap_loss.total_loss/1e6) }}M</span></span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="heatloss_worst">Worst single hour</strong>:
+        <span class="hl-num">{{ "%02d"|format(heatmap_loss.worst_cell.dia) }}/{{ heatmap_loss.worst_cell.hora }}h
+        — R$ {{ "%.0f"|format(heatmap_loss.worst_cell.valor/1000) }}k</span></span>
+    </div>
+
+    <div class="chart"><div id="heatmap_loss_rs" style="height:480px"></div></div>
+    {% endif %}
+
   </div><!-- /tab curt -->
 
   <!-- ============================================================ -->
@@ -4301,11 +4757,188 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% endif %}
 
     <!-- ========================================================= -->
+    <!-- ONDA 2B.2: Modulation Alpha (Mauriti vs NE decomposition) -->
+    <!-- ========================================================= -->
+    {% if modulation_alpha and not modulation_alpha.vazio %}
+    <div class="section-head">
+      <span class="num">VI.</span>
+      <h3 data-i18n="alpha_title">Modulation alpha · Mauriti vs NE benchmark</h3>
+      <span class="tag tag-{% if modulation_alpha.gap_pp < 0 %}neg{% else %}pos{% endif %}"
+            data-i18n="alpha_tag">DECOMPOSITION</span>
+    </div>
+    <p class="section-desc" data-i18n="alpha_desc">
+      Decomposes the gap between Mauriti and the NE solar fleet benchmark into
+      structural components: timing/profile (Mauriti is solar-only vs NE
+      including wind night generation) and residual bias (local curtailment,
+      operational issues, location-specific factors).
+    </p>
+
+    <div class="alpha-card">
+      <div class="alpha-headline">
+        <div class="alpha-side">
+          <div class="alpha-label" data-i18n="alpha_mauriti">Mauriti</div>
+          <div class="alpha-val {% if modulation_alpha.mauriti_desconto_pct < 0 %}neg{% endif %}">
+            {{ "%.2f"|format(modulation_alpha.mauriti_desconto_pct) }}%
+          </div>
+          <div class="alpha-tiny">PLD eff: R$ {{ "%.0f"|format(modulation_alpha.pld_eff_mauriti) }}/MWh</div>
+        </div>
+        <div class="alpha-vs">vs</div>
+        <div class="alpha-side">
+          <div class="alpha-label" data-i18n="alpha_ne">NE benchmark</div>
+          <div class="alpha-val {% if modulation_alpha.ne_desconto_pct < 0 %}neg{% endif %}">
+            {{ "%.2f"|format(modulation_alpha.ne_desconto_pct) }}%
+          </div>
+          <div class="alpha-tiny">PLD eff: R$ {{ "%.0f"|format(modulation_alpha.pld_eff_ne) }}/MWh</div>
+        </div>
+        <div class="alpha-gap">
+          <div class="alpha-tiny" data-i18n="alpha_gap_label">Gap (Mauriti − NE)</div>
+          <div class="alpha-gap-val {% if modulation_alpha.gap_pp < 0 %}neg{% else %}pos{% endif %}">
+            {{ "%+.2f"|format(modulation_alpha.gap_pp) }} pp
+          </div>
+          <div class="alpha-tiny">R$ {{ "%+.2f"|format(modulation_alpha.gap_abs_rs/1e6) }}M <span data-i18n="alpha_gap_rs">extra loss</span></div>
+        </div>
+      </div>
+
+      <div class="alpha-decomp">
+        <div class="alpha-decomp-title" data-i18n="alpha_decomp_title">Gap decomposition</div>
+        <div class="alpha-decomp-row">
+          <div class="alpha-decomp-bar-wrap">
+            <span class="alpha-decomp-name" data-i18n="alpha_decomp_timing">Solar timing (vs NE mix)</span>
+            <div class="alpha-decomp-bar">
+              {% set timing_w = (modulation_alpha.decomp.timing_pp|abs) / (modulation_alpha.gap_pp|abs|float|max(0.01,modulation_alpha.gap_pp|abs)) * 100 %}
+              <div class="alpha-decomp-fill {% if modulation_alpha.decomp.timing_pp < 0 %}neg{% else %}pos{% endif %}"
+                   style="width:{{ [timing_w, 100]|min }}%"></div>
+            </div>
+          </div>
+          <div class="alpha-decomp-val {% if modulation_alpha.decomp.timing_pp < 0 %}neg{% else %}pos{% endif %}">
+            {{ "%+.2f"|format(modulation_alpha.decomp.timing_pp) }} pp
+          </div>
+        </div>
+        <div class="alpha-decomp-row">
+          <div class="alpha-decomp-bar-wrap">
+            <span class="alpha-decomp-name" data-i18n="alpha_decomp_bias">Local bias (curtailment, operational, location)</span>
+            <div class="alpha-decomp-bar">
+              {% set bias_w = (modulation_alpha.decomp.bias_pp|abs) / (modulation_alpha.gap_pp|abs|float|max(0.01,modulation_alpha.gap_pp|abs)) * 100 %}
+              <div class="alpha-decomp-fill {% if modulation_alpha.decomp.bias_pp < 0 %}neg{% else %}pos{% endif %}"
+                   style="width:{{ [bias_w, 100]|min }}%"></div>
+            </div>
+          </div>
+          <div class="alpha-decomp-val {% if modulation_alpha.decomp.bias_pp < 0 %}neg{% else %}pos{% endif %}">
+            {{ "%+.2f"|format(modulation_alpha.decomp.bias_pp) }} pp
+          </div>
+        </div>
+      </div>
+
+      <p class="alpha-prose">
+        {% if modulation_alpha.gap_pp < -3 %}
+          {% if modulation_alpha.decomp.bias_pp < -3 %}
+            <span data-i18n="alpha_prose_local">Mauriti underperforms NE benchmark significantly, with a strong local bias component — suggests local curtailment, operational issues, or location-specific factors beyond the inevitable solar timing penalty. Investigate.</span>
+          {% else %}
+            <span data-i18n="alpha_prose_timing">Mauriti underperforms NE benchmark, mostly explained by solar timing (NE benchmark benefits from wind generation at night when PLD is higher). This is a structural feature of pure-solar plants.</span>
+          {% endif %}
+        {% elif modulation_alpha.gap_pp > 3 %}
+          <span data-i18n="alpha_prose_better">Mauriti outperforms NE benchmark — favorable position.</span>
+        {% else %}
+          <span data-i18n="alpha_prose_aligned">Mauriti tracks NE benchmark closely — no structural advantage or disadvantage.</span>
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+
+    <!-- ========================================================= -->
+    <!-- ONDA 2B.3: Detecção de anomalias de geração               -->
+    <!-- ========================================================= -->
+    {% if anomalias and not anomalias.vazio %}
+    <div class="section-head">
+      <span class="num">VII.</span>
+      <h3 data-i18n="anom_title">Generation anomalies · last {{ anomalias.lookback_dias }} days</h3>
+      {% if anomalias.n_critical > 0 %}
+        <span class="tag tag-neg" data-i18n="anom_tag_crit">{{ anomalias.n_critical }} CRITICAL</span>
+      {% elif anomalias.n_warning > 0 %}
+        <span class="tag tag-warn" data-i18n="anom_tag_warn">{{ anomalias.n_warning }} WARNINGS</span>
+      {% else %}
+        <span class="tag tag-ok" data-i18n="anom_tag_ok">CLEAN</span>
+      {% endif %}
+    </div>
+    <p class="section-desc" data-i18n="anom_desc">
+      Days where Mauriti generated significantly less than expected (based on
+      NE regional benchmark scaled by historical ratio) AND not explained by
+      reported curtailment. Possible causes: inverter failure, tracker issues,
+      soiling, undeclared maintenance, sensor problems.
+    </p>
+
+    {% if anomalias.n_total == 0 %}
+    <div class="anom-clean">
+      <div class="anom-clean-icon">✓</div>
+      <div>
+        <div class="anom-clean-title" data-i18n="anom_clean_title">No anomalies detected</div>
+        <div class="anom-clean-desc" data-i18n="anom_clean_desc">{{ anomalias.n_dias_analisados }} days analyzed · baseline ratio Mauriti/NE = {{ "%.3f"|format(anomalias.ratio_baseline) }}</div>
+      </div>
+    </div>
+    {% else %}
+    <div class="anom-summary">
+      <div class="anom-stat">
+        <div class="anom-stat-val crit">{{ anomalias.n_critical }}</div>
+        <div class="anom-stat-lbl" data-i18n="anom_critical">critical (gap &gt;30%)</div>
+      </div>
+      <div class="anom-stat">
+        <div class="anom-stat-val warn">{{ anomalias.n_warning }}</div>
+        <div class="anom-stat-lbl" data-i18n="anom_warning">warnings (gap 15-30%)</div>
+      </div>
+      <div class="anom-stat">
+        <div class="anom-stat-val">{{ anomalias.n_dias_analisados }}</div>
+        <div class="anom-stat-lbl" data-i18n="anom_analyzed">days analyzed</div>
+      </div>
+      <div class="anom-stat">
+        <div class="anom-stat-val">{{ "%.3f"|format(anomalias.ratio_baseline) }}</div>
+        <div class="anom-stat-lbl" data-i18n="anom_baseline">Mauriti/NE ratio baseline</div>
+      </div>
+    </div>
+
+    <table class="anom-table">
+      <thead>
+        <tr>
+          <th data-i18n="anom_th_sev">Severity</th>
+          <th data-i18n="anom_th_date">Date</th>
+          <th class="num" data-i18n="anom_th_real">Actual gen (MWh)</th>
+          <th class="num" data-i18n="anom_th_exp">Expected (MWh)</th>
+          <th class="num" data-i18n="anom_th_curt">Curtailment (MWh)</th>
+          <th class="num" data-i18n="anom_th_gap">Gap (%)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in anomalias.anomalias %}
+        <tr class="anom-row anom-{{ a.severidade }}">
+          <td>
+            {% if a.severidade == "critical" %}
+              <span class="anom-tag crit">●</span>
+            {% else %}
+              <span class="anom-tag warn">●</span>
+            {% endif %}
+          </td>
+          <td>{{ a.data }}</td>
+          <td class="num">{{ "%.0f"|format(a.gen_real) }}</td>
+          <td class="num">{{ "%.0f"|format(a.gen_esperada) }}</td>
+          <td class="num">{{ "%.0f"|format(a.curt) }}</td>
+          <td class="num"><strong>{{ "%.1f"|format(a.gap_pct) }}%</strong></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p class="anom-note">
+      <strong data-i18n="anom_note_title">Note:</strong>
+      <span data-i18n="anom_note_p">Anomalies are heuristic — not all are real problems. Days with abnormal cloudiness affecting Mauriti differently than NE region can appear here. Use as starting point for operational investigation.</span>
+    </p>
+    {% endif %}
+    {% endif %}
+
+    <!-- ========================================================= -->
     <!-- MONTHLY FORECAST (substitui o PPA What-If antigo)            -->
     <!-- Foco: projecao financeira do mes corrente (CCEE + Comercial) -->
     <!-- ========================================================= -->
     <div class="section-head">
-      <span class="num">VI.</span>
+      <span class="num">VIII.</span>
       <h3 data-i18n="forecast_title">Monthly forecast</h3>
       <span class="tag" data-i18n="forecast_tag">INTERACTIVE</span>
     </div>
@@ -5472,7 +6105,46 @@ const I18N = {
     razao_prose_high_p: " pela REN 1.030/2022. Caso forte para pleitos de ressarcimento.",
     razao_prose_mid: "dos MWh cortados são potencialmente elegíveis a ressarcimento. Perfil misto — revisar caso a caso.",
     razao_prose_low: "A maior parte do curtailment é ENE/PAR (não elegível a ressarcimento). Curtailment dirigido por excesso de oferta, não por falhas externas de rede.",
-    razao_prose_low_elig: "elegível)"
+    razao_prose_low_elig: "elegível)",
+    // ===== ONDA 2B =====
+    heatloss_title: "Mapa de calor de perda financeira · mês corrente",
+    heatloss_tag: "R$ × HORA",
+    heatloss_desc: "Cada célula mostra a perda em R$ (curtailment MWh × PLD spot) pra cada dia e hora do mês corrente. Revela quando o curtailment dói mais — não só quanto.",
+    heatloss_total: "Perda total do mês",
+    heatloss_worst: "Pior hora isolada",
+    alpha_title: "Modulation alpha · Mauriti vs benchmark NE",
+    alpha_tag: "DECOMPOSIÇÃO",
+    alpha_desc: "Decompõe o gap entre Mauriti e a frota NE em componentes estruturais: timing/perfil (Mauriti é só solar, NE inclui eólica que gera de noite) e bias residual (curtailment local, problemas operacionais, fatores específicos da localização).",
+    alpha_mauriti: "Mauriti",
+    alpha_ne: "Benchmark NE",
+    alpha_gap_label: "Gap (Mauriti − NE)",
+    alpha_gap_rs: "perda extra",
+    alpha_decomp_title: "Decomposição do gap",
+    alpha_decomp_timing: "Timing solar (vs mix NE)",
+    alpha_decomp_bias: "Bias local (curtailment, operacional, localização)",
+    alpha_prose_local: "Mauriti tem desempenho significativamente abaixo do benchmark NE, com forte componente de bias local — sugere curtailment local, problemas operacionais ou fatores específicos da localização além da penalidade inevitável de timing solar. Investigar.",
+    alpha_prose_timing: "Mauriti abaixo do benchmark NE, principalmente explicado pelo timing solar (benchmark NE se beneficia de geração eólica à noite quando o PLD é maior). Característica estrutural de usinas puramente solares.",
+    alpha_prose_better: "Mauriti acima do benchmark NE — posição favorável.",
+    alpha_prose_aligned: "Mauriti acompanha o benchmark NE de perto — sem vantagem ou desvantagem estrutural.",
+    anom_title: "Anomalias de geração · últimos",
+    anom_tag_crit: "CRÍTICOS",
+    anom_tag_warn: "ALERTAS",
+    anom_tag_ok: "LIMPO",
+    anom_desc: "Dias onde Mauriti gerou significativamente menos que o esperado (com base no benchmark NE regional escalado pelo ratio histórico) E não explicado por curtailment reportado. Causas possíveis: falha de inversor, problemas de tracker, sujeira, manutenção não-declarada, problemas de sensor.",
+    anom_clean_title: "Nenhuma anomalia detectada",
+    anom_clean_desc: "dias analisados · ratio baseline Mauriti/NE =",
+    anom_critical: "críticos (gap >30%)",
+    anom_warning: "alertas (gap 15-30%)",
+    anom_analyzed: "dias analisados",
+    anom_baseline: "ratio baseline Mauriti/NE",
+    anom_th_sev: "Severidade",
+    anom_th_date: "Data",
+    anom_th_real: "Geração real (MWh)",
+    anom_th_exp: "Esperada (MWh)",
+    anom_th_curt: "Curtailment (MWh)",
+    anom_th_gap: "Gap (%)",
+    anom_note_title: "Nota:",
+    anom_note_p: "Anomalias são heurísticas — nem todas são problemas reais. Dias com nebulosidade anormal afetando Mauriti diferentemente da região NE podem aparecer aqui. Use como ponto de partida pra investigação operacional."
   }
 };
 
@@ -6924,6 +7596,37 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
               f"{pct_classif:.0f}% classificado pelo ONS "
               f"({razao_meta.get('periodo_label', '?')})")
 
+    # ========== ONDA 2B.1: Heatmap perda financeira (mes corrente) ==========
+    heatmap_loss = calcular_heatmap_perda_rs(mauriti.df, cur_first, today)
+    if not heatmap_loss.get("vazio"):
+        wc = heatmap_loss["worst_cell"]
+        print(f"[*] Heatmap perda R$ mes: total R$ {heatmap_loss['total_loss']/1e6:.2f}M, "
+              f"pior hora dia {wc['dia']:02d} as {wc['hora']:02d}h "
+              f"(R$ {wc['valor']/1000:,.0f}k)")
+
+    # ========== ONDA 2B.2: Modulation Alpha ==========
+    alpha_data = calcular_modulation_alpha(diario_m, diario_ne, cur_first, today)
+    if not alpha_data.get("vazio"):
+        print(f"[*] Modulation Alpha: Mauriti {alpha_data['mauriti_desconto_pct']:.2f}% "
+              f"vs NE {alpha_data['ne_desconto_pct']:.2f}% "
+              f"= gap {alpha_data['gap_pp']:+.2f} pp "
+              f"(R$ {alpha_data['gap_abs_rs']/1e6:+.2f}M)")
+        print(f"    Decomp: timing {alpha_data['decomp']['timing_pp']:+.2f} pp, "
+              f"bias {alpha_data['decomp']['bias_pp']:+.2f} pp")
+
+    # ========== ONDA 2B.3: Detecção anomalia geração ==========
+    anomalia_data = detectar_anomalias_geracao(
+        hor_m, mauriti.df, ne_horario.rename(columns={"mwh_total_ne": "mwh"})
+            if not ne_horario.empty else pd.DataFrame(),
+        today, lookback_dias=60)
+    if not anomalia_data.get("vazio"):
+        print(f"[*] Anomalias geracao (lookback {anomalia_data['lookback_dias']}d): "
+              f"{anomalia_data['n_total']} dias detectados "
+              f"({anomalia_data['n_critical']} criticos, "
+              f"{anomalia_data['n_warning']} warnings) "
+              f"em {anomalia_data['n_dias_analisados']} analisados, "
+              f"ratio baseline {anomalia_data['ratio_baseline']:.3f}")
+
     # ========== AGREGADO MENSAL PARA O SIMULADOR PPA ==========
     # Para cada mes, agrega geração+receita de Mauriti + PLD de todos os
     # submercados. JS no client-side usa pra simular cenarios de PPA.
@@ -7212,6 +7915,11 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         figs["razao_donut"] = json.loads(pio.to_json(
             g_donut_curtailment_razao(df_razao)))
 
+    # ===== ONDA 2B.1: Heatmap perda financeira R$/hora mes corrente =====
+    if not heatmap_loss.get("vazio"):
+        figs["heatmap_loss_rs"] = json.loads(pio.to_json(
+            g_heatmap_perda_rs(heatmap_loss)))
+
     grupos_str = ", ".join([g.label for g in grupos]) if grupos else "—"
     pld_fallback = bool(pld.attrs.get("fallback", False))
 
@@ -7265,6 +7973,9 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         itm_otm=itm_data,
         razao_breakdown=razao_data,
         razao_meta=razao_meta,
+        heatmap_loss=heatmap_loss,
+        modulation_alpha=alpha_data,
+        anomalias=anomalia_data,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
