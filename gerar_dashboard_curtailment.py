@@ -60,9 +60,11 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.11"
+DASH_VERSION = "5.12"
 DASH_VERSION_DATE = "2026-05-19"
 DASH_CHANGES = [
+    "v5.12 (2026-05-19): Onda 4A - Nova aba Setor + Comparacao multi-mes "
+    "(janelas moveis 3/6/12 meses)",
     "v5.11 (2026-05-19): Onda 3 - Forecast probabilistico P10/P50/P90 + "
     "3 cenarios (Otimista/Base/Pessimista)",
     "v5.10 (2026-05-19): Onda 2B - Heatmap perda R$, Modulation Alpha "
@@ -73,7 +75,6 @@ DASH_CHANGES = [
     "tooltips, modo dark/light, atalhos teclado, print/screenshot, footer",
     "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
     "v5.6 (2026-05-17): Monthly forecast (CCEE View + Commercial + 3 cards)",
-    "v5.5 (2026-05-15): Tracker upgrades + Benchmark v2 multi-select",
 ]
 
 CONFIG: dict[str, Any] = {
@@ -1991,6 +1992,153 @@ def calcular_3_cenarios(diario_m: pd.DataFrame, mauriti_df: pd.DataFrame,
     )
 
 
+# =============================================================================
+#  ONDA 4A: Comparacao multi-mes (sliding window 3/6/12 meses)
+# =============================================================================
+
+def calcular_comparacao_multimes(mauriti_df: pd.DataFrame,
+                                      diario_m: pd.DataFrame,
+                                      mod_mensal_data: list,
+                                      today: date) -> dict:
+    """Agrega KPIs por mes para comparacao multi-mes. Retorna lista de dicts
+    ordenada cronologicamente, contendo metricas chave por mes:
+    - mwh_gerado, mwh_curtailment, cf_pct
+    - desconto_modulacao_pct, perd_rs (perda total)
+    - pld_efetivo, pld_medio_spot
+
+    Tambem calcula rolling averages para janelas 3, 6, 12 meses.
+    """
+    if mauriti_df.empty:
+        return {"vazio": True}
+
+    # ============ Agregacao de curtailment por mes ============
+    df = mauriti_df.copy()
+    df = df[df["curtailment_mwh"] > 0]
+    df["mes_period"] = df["din_instante"].dt.to_period("M")
+    df["mes_str"] = df["mes_period"].astype(str)  # "YYYY-MM"
+
+    curt_por_mes = df.groupby("mes_str").agg(
+        curt_mwh=("curtailment_mwh", "sum"),
+        estim_mwh=("estimada_mwh", "sum"),
+        n_horas=("curtailment_mwh", "count"),
+    ).reset_index()
+    curt_por_mes["cf_pct"] = (100 * curt_por_mes["curt_mwh"] /
+                                  curt_por_mes["estim_mwh"].replace(0, np.nan)).fillna(0)
+
+    # Curtailment × PLD para perda em R$
+    if "pld" in df.columns:
+        df["perd_rs"] = df["curtailment_mwh"] * df["pld"].fillna(0)
+        perd_por_mes = df.groupby("mes_str")["perd_rs"].sum().reset_index()
+        curt_por_mes = curt_por_mes.merge(perd_por_mes, on="mes_str", how="left")
+    else:
+        curt_por_mes["perd_rs"] = 0.0
+
+    # ============ Agregacao de modulacao por mes ============
+    # Usa mod_mensal_data ja calculado
+    mod_dict = {m["month"]: m for m in (mod_mensal_data or [])}
+
+    # ============ Merge tudo ============
+    rows = []
+    todos_meses = sorted(set(curt_por_mes["mes_str"]) | set(mod_dict.keys()))
+
+    for mes_str in todos_meses:
+        # Parse mes
+        try:
+            year, month = mes_str.split("-")
+            mes_date = date(int(year), int(month), 1)
+        except (ValueError, AttributeError):
+            continue
+
+        # Skip futuro
+        if mes_date > today:
+            continue
+
+        # Pega curtailment do mes (se existir)
+        cm = curt_por_mes[curt_por_mes["mes_str"] == mes_str]
+        curt_mwh = float(cm["curt_mwh"].iloc[0]) if not cm.empty else 0.0
+        cf_pct = float(cm["cf_pct"].iloc[0]) if not cm.empty else 0.0
+        perd_rs = float(cm["perd_rs"].iloc[0]) if not cm.empty else 0.0
+
+        # Pega modulacao do mes (se existir)
+        md = mod_dict.get(mes_str)
+        if md:
+            mwh_gerado = float(md["mwh_total"])
+            receita_real = float(md["receita_real"])
+            receita_flat = float(md["receita_flat"])
+            desconto_pct = (100 * (receita_real - receita_flat) / receita_flat
+                              if receita_flat > 0 else 0)
+            pld_efetivo = float(md["pld_efetivo"])
+            pld_spot = float(md["pld_medio_ne"])
+            month_label = md["month_label"]
+        else:
+            mwh_gerado = receita_real = receita_flat = 0.0
+            desconto_pct = pld_efetivo = pld_spot = 0.0
+            # Label fallback
+            meses_curtos = ["jan", "feb", "mar", "apr", "may", "jun",
+                              "jul", "aug", "sep", "oct", "nov", "dec"]
+            month_label = f"{meses_curtos[mes_date.month-1]}/{str(mes_date.year)[2:]}"
+
+        # Skip se nao tem dado em nenhum
+        if curt_mwh == 0 and mwh_gerado == 0:
+            continue
+
+        rows.append(dict(
+            month=mes_str,
+            month_label=month_label,
+            mes_date=mes_date.isoformat(),
+            mwh_gerado=mwh_gerado,
+            curt_mwh=curt_mwh,
+            cf_pct=cf_pct,
+            perd_rs=perd_rs,
+            receita_real=receita_real,
+            receita_flat=receita_flat,
+            desconto_pct=desconto_pct,
+            pld_efetivo=pld_efetivo,
+            pld_spot=pld_spot,
+        ))
+
+    if not rows:
+        return {"vazio": True}
+
+    # Ordena por data ascendente
+    rows.sort(key=lambda r: r["mes_date"])
+
+    # ============ Calcula janelas (3, 6, 12 meses) ============
+    def _janela_stats(n_meses):
+        """Retorna media dos ultimos N meses (excluindo mes corrente parcial)."""
+        # Pega ate os N ultimos meses fechados (excluindo o mes atual parcial)
+        meses_fechados = [r for r in rows
+                            if not (r["mes_date"][:7] == today.strftime("%Y-%m"))]
+        sample = meses_fechados[-n_meses:] if len(meses_fechados) >= 1 else []
+        if not sample:
+            return None
+        return dict(
+            n=len(sample),
+            cf_pct=sum(r["cf_pct"] for r in sample) / len(sample),
+            desconto_pct=sum(r["desconto_pct"] for r in sample) / len(sample),
+            curt_mwh_total=sum(r["curt_mwh"] for r in sample),
+            perd_rs_total=sum(r["perd_rs"] for r in sample),
+            mwh_gerado_total=sum(r["mwh_gerado"] for r in sample),
+            pld_efetivo=sum(r["pld_efetivo"] for r in sample) / len(sample),
+            pld_spot=sum(r["pld_spot"] for r in sample) / len(sample),
+            range_label=(f"{sample[0]['month_label']} — "
+                            f"{sample[-1]['month_label']}"),
+        )
+
+    janelas = {
+        "3": _janela_stats(3),
+        "6": _janela_stats(6),
+        "12": _janela_stats(12),
+    }
+
+    return dict(
+        vazio=False,
+        rows=rows,
+        n_meses_total=len(rows),
+        janelas=janelas,
+    )
+
+
 
 
 def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
@@ -3702,6 +3850,63 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   font-weight:600;margin:0 6px}
 @media (max-width:840px){.cen-grid{grid-template-columns:1fr;gap:12px}}
 
+/* ===== ONDA 4A: Multi-mes ===== */
+.mm-toggle{display:flex;gap:10px;align-items:center;margin:16px 0;
+  font-size:11px;color:var(--muted);letter-spacing:0.08em;
+  text-transform:uppercase;flex-wrap:wrap}
+.mm-btn{background:var(--panel);border:1px solid var(--border2);
+  color:var(--ink-2);padding:7px 14px;border-radius:3px;cursor:pointer;
+  font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+  letter-spacing:0.04em;font-weight:500;transition:all 0.15s}
+.mm-btn:hover{background:var(--bg-alt);color:var(--ink)}
+.mm-btn.active{background:var(--ink);color:var(--bg);
+  border-color:var(--ink)}
+.mm-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:16px 0}
+.mm-period{font-size:12px;color:var(--ink-2);margin-bottom:18px;
+  padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  font-family:'IBM Plex Mono',monospace}
+.mm-period strong{color:var(--ink);letter-spacing:0.08em;
+  text-transform:uppercase;font-size:10px;font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif}
+.mm-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;
+  margin-bottom:24px}
+.mm-cell{background:var(--bg-alt);padding:14px;border-radius:3px;
+  border-left:3px solid var(--rule);text-align:left}
+.mm-tiny{font-size:9px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;font-weight:600;line-height:1.3}
+.mm-val{font-family:'Fraunces',Georgia,serif;font-size:22px;
+  font-weight:500;color:var(--ink);line-height:1;margin:6px 0 2px}
+.mm-unit{font-size:10px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace}
+.mm-unit .mm-extra{margin-left:4px}
+.mm-table{width:100%;border-collapse:collapse;font-size:13px;
+  margin-top:6px}
+.mm-table th{font-size:10px;color:var(--muted);letter-spacing:0.12em;
+  text-transform:uppercase;font-weight:600;text-align:left;
+  padding:10px 12px;border-bottom:1px solid var(--border2);
+  background:var(--bg-alt)}
+.mm-table th.num{text-align:right}
+.mm-table td{padding:10px 12px;border-bottom:1px solid var(--border);
+  color:var(--ink-2)}
+.mm-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.mm-table td.num.neg{color:var(--accent)}
+.mm-table td.num.pos{color:var(--ok)}
+.mm-table tr:last-child td{border-bottom:none}
+@media (max-width:840px){
+  .mm-stats{grid-template-columns:repeat(2,1fr)}
+}
+
+/* ===== ONDA 4: Setor tab placeholder ===== */
+.setor-placeholder{margin-top:48px;padding:18px 20px;
+  background:var(--bg-alt);border:1px dashed var(--border2);
+  border-radius:4px;text-align:center}
+.setor-soon{font-size:12px;color:var(--muted);line-height:1.6;margin:0;
+  font-family:'IBM Plex Mono',monospace}
+.setor-soon strong{color:var(--ink);letter-spacing:0.05em;
+  font-family:'IBM Plex Sans',sans-serif}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -4356,6 +4561,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <button class="tab" data-tab="ren" data-i18n="tab_ren">REN 1.030 tracker</button>
     <button class="tab" data-tab="solar" data-i18n="tab_solar">Solar resource</button>
     <button class="tab" data-tab="bench" data-i18n="tab_bench">Benchmark</button>
+    <button class="tab" data-tab="setor" data-i18n="tab_setor">Sector context</button>
   </div>
 
   <!-- ============================================================ -->
@@ -6081,6 +6287,109 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
   </div><!-- /tab bench -->
 
+  <!-- ============================================================ -->
+  <!-- TAB: SETOR / SECTOR CONTEXT (Onda 4)                          -->
+  <!-- ============================================================ -->
+  <div class="tab-pane" data-tab="setor">
+
+    <div class="hero">
+      <div class="kicker" data-i18n="setor_kicker">POWERCHINA &middot; MAURITI &middot; SECTOR CONTEXT</div>
+      <h1 data-i18n="setor_title">Sector context</h1>
+      <p class="lead" data-i18n="setor_lead">
+        Macro and multi-month views to contextualize Mauriti's performance against
+        broader sector dynamics.
+      </p>
+    </div>
+
+    {% if multimes and not multimes.vazio %}
+    <div class="section-head">
+      <span class="num">I.</span>
+      <h3 data-i18n="mm_title">Multi-month comparison · rolling window</h3>
+      <span class="tag" data-i18n="mm_tag">SLIDING AVERAGE</span>
+    </div>
+    <p class="section-desc" data-i18n="mm_desc">
+      Compare Mauriti's KPIs across rolling windows (3, 6, or 12 closed months).
+      Smooths out monthly noise and reveals trends. Current partial month is
+      excluded to ensure apples-to-apples comparisons.
+    </p>
+
+    <div class="mm-toggle">
+      <span data-i18n="mm_show">Show:</span>
+      <button class="mm-btn" data-window="3" data-i18n="mm_3m">Last 3 months</button>
+      <button class="mm-btn active" data-window="6" data-i18n="mm_6m">Last 6 months</button>
+      <button class="mm-btn" data-window="12" data-i18n="mm_12m">Last 12 months</button>
+    </div>
+
+    <div class="mm-card">
+      <div class="mm-period" id="mm-period">
+        <strong data-i18n="mm_window_label">Window:</strong>
+        <span id="mm-range">—</span>
+        <span class="razao-period-sep">·</span>
+        <span><strong id="mm-n-months">—</strong> <span data-i18n="mm_months_closed">closed months</span></span>
+      </div>
+
+      <div class="mm-stats">
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_cf">CF% average</div>
+          <div class="mm-val" id="mm-cf">—</div>
+          <div class="mm-unit">% <span class="mm-extra" data-i18n="mm_cf_extra">of expected</span></div>
+        </div>
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_curt">Curtailed (total)</div>
+          <div class="mm-val" id="mm-curt">—</div>
+          <div class="mm-unit">MWh</div>
+        </div>
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_loss">Lost (total)</div>
+          <div class="mm-val" id="mm-loss">—</div>
+          <div class="mm-unit">R$ M</div>
+        </div>
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_mod">Modulation avg</div>
+          <div class="mm-val" id="mm-mod">—</div>
+          <div class="mm-unit">%</div>
+        </div>
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_pld_eff">PLD effective avg</div>
+          <div class="mm-val" id="mm-pld-eff">—</div>
+          <div class="mm-unit">R$/MWh</div>
+        </div>
+        <div class="mm-cell">
+          <div class="mm-tiny" data-i18n="mm_pld_spot">PLD spot avg</div>
+          <div class="mm-val" id="mm-pld-spot">—</div>
+          <div class="mm-unit">R$/MWh</div>
+        </div>
+      </div>
+
+      <table class="mm-table">
+        <thead>
+          <tr>
+            <th data-i18n="mm_th_month">Month</th>
+            <th class="num" data-i18n="mm_th_mwh">MWh generated</th>
+            <th class="num" data-i18n="mm_th_curt_mwh">Curtailment (MWh)</th>
+            <th class="num" data-i18n="mm_th_cf">CF%</th>
+            <th class="num" data-i18n="mm_th_mod">Modulation</th>
+            <th class="num" data-i18n="mm_th_pld_eff">PLD eff (R$/MWh)</th>
+            <th class="num" data-i18n="mm_th_loss">Loss (R$)</th>
+          </tr>
+        </thead>
+        <tbody id="mm-tbody">
+          <!-- populated by JS -->
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    <!-- Placeholder for future sections (5.1, 5.2 in Onda 4B) -->
+    <div class="setor-placeholder">
+      <p class="setor-soon">
+        <strong data-i18n="setor_soon">🚧 Coming next:</strong>
+        <span data-i18n="setor_soon_p">Brazilian system panel (SIN load, renewable generation) and reservoir thermometer (ONS Energy Stored by submarket) will be added in the next wave.</span>
+      </p>
+    </div>
+
+  </div><!-- /tab setor -->
+
   <!-- Glossary -->
   <details class="glossary">
     <summary data-i18n="glossary_title">Glossary &amp; technical notes</summary>
@@ -6634,7 +6943,37 @@ const I18N = {
     cen_curt_atual: "Curtailment atual",
     cen_days: "Dias restantes",
     cen_spread_title: "Spread total (Otimista − Pessimista):",
-    cen_spread_desc: "— a faixa operacional que você deve planejar."
+    cen_spread_desc: "— a faixa operacional que você deve planejar.",
+    // ===== ONDA 4A: Multi-mes / Setor =====
+    tab_setor: "Contexto setorial",
+    setor_kicker: "POWERCHINA · MAURITI · CONTEXTO SETORIAL",
+    setor_title: "Contexto setorial",
+    setor_lead: "Visões macro e multi-mês pra contextualizar o desempenho de Mauriti frente a dinâmicas mais amplas do setor.",
+    mm_title: "Comparação multi-mês · janela móvel",
+    mm_tag: "MÉDIA MÓVEL",
+    mm_desc: "Compara KPIs de Mauriti em janelas móveis (3, 6 ou 12 meses fechados). Suaviza ruído mensal e revela tendências. O mês corrente parcial é excluído pra garantir comparações apples-to-apples.",
+    mm_show: "Mostrar:",
+    mm_3m: "Últimos 3 meses",
+    mm_6m: "Últimos 6 meses",
+    mm_12m: "Últimos 12 meses",
+    mm_window_label: "Janela:",
+    mm_months_closed: "meses fechados",
+    mm_cf: "CF% médio",
+    mm_cf_extra: "do esperado",
+    mm_curt: "Cortado (total)",
+    mm_loss: "Perda (total)",
+    mm_mod: "Modulação média",
+    mm_pld_eff: "PLD efetivo médio",
+    mm_pld_spot: "PLD spot médio",
+    mm_th_month: "Mês",
+    mm_th_mwh: "MWh gerados",
+    mm_th_curt_mwh: "Curtailment (MWh)",
+    mm_th_cf: "CF%",
+    mm_th_mod: "Modulação",
+    mm_th_pld_eff: "PLD ef (R$/MWh)",
+    mm_th_loss: "Perda (R$)",
+    setor_soon: "🚧 Próximas etapas:",
+    setor_soon_p: "Painel Sistema Brasil (carga SIN, geração renovável) e termômetro de reservatórios (Energia Armazenada por submercado pelo ONS) serão adicionados na próxima onda."
   }
 };
 
@@ -7733,6 +8072,7 @@ document.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   const tabMap = {
     'c': 'curt', 'm': 'mod', 'r': 'ren', 's': 'solar', 'b': 'bench',
+    'x': 'setor',
   };
   if (key in tabMap) {
     const tab = document.querySelector(`.tab[data-tab="${tabMap[key]}"]`);
@@ -7754,7 +8094,8 @@ document.addEventListener('keydown', (e) => {
       '  M - Aba Modulation effect\n' +
       '  R - Aba REN 1.030 tracker\n' +
       '  S - Aba Solar resource\n' +
-      '  B - Aba Benchmark\n\n' +
+      '  B - Aba Benchmark\n' +
+      '  X - Aba Setor (contexto)\n\n' +
       '  D - Toggle Dark/Light mode\n' +
       '  F - Toggle Presentation mode\n' +
       '  P - Print / Save PDF\n' +
@@ -7770,6 +8111,81 @@ function toggleChangelog() {
     list.style.display = list.style.display === 'none' ? 'block' : 'none';
   }
 }
+
+// =============================================================================
+// ONDA 4A: Multi-month rolling window comparison
+// =============================================================================
+const MULTIMES = {{ multimes_json|safe }};
+
+function formatNum(v, decimals) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return v.toLocaleString('pt-BR', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  });
+}
+
+function mmRenderWindow(nMeses) {
+  if (!MULTIMES || MULTIMES.vazio) return;
+  const j = MULTIMES.janelas[String(nMeses)];
+  if (!j) {
+    document.getElementById('mm-range').textContent =
+      'Não há ' + nMeses + ' meses fechados ainda';
+    return;
+  }
+  // Atualiza headline
+  document.getElementById('mm-range').textContent = j.range_label;
+  document.getElementById('mm-n-months').textContent = j.n;
+
+  // KPIs
+  document.getElementById('mm-cf').textContent = formatNum(j.cf_pct, 2);
+  document.getElementById('mm-curt').textContent = formatNum(j.curt_mwh_total, 0);
+  document.getElementById('mm-loss').textContent = formatNum(j.perd_rs_total / 1e6, 2);
+  document.getElementById('mm-mod').textContent = (j.desconto_pct >= 0 ? '+' : '') +
+                                                     formatNum(j.desconto_pct, 2);
+  document.getElementById('mm-pld-eff').textContent = formatNum(j.pld_efetivo, 0);
+  document.getElementById('mm-pld-spot').textContent = formatNum(j.pld_spot, 0);
+
+  // Tabela: pega os ultimos N meses fechados
+  const today = new Date();
+  const curMes = today.getFullYear() + '-' +
+                  String(today.getMonth() + 1).padStart(2, '0');
+  const mesesFechados = MULTIMES.rows.filter(r => r.month !== curMes);
+  const sample = mesesFechados.slice(-nMeses);
+
+  const tbody = document.getElementById('mm-tbody');
+  tbody.innerHTML = '';
+  for (const r of sample) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.month_label}</td>
+      <td class="num">${formatNum(r.mwh_gerado, 0)}</td>
+      <td class="num">${formatNum(r.curt_mwh, 0)}</td>
+      <td class="num">${formatNum(r.cf_pct, 2)}%</td>
+      <td class="num ${r.desconto_pct < 0 ? 'neg' : 'pos'}">
+        ${r.desconto_pct >= 0 ? '+' : ''}${formatNum(r.desconto_pct, 2)}%
+      </td>
+      <td class="num">${formatNum(r.pld_efetivo, 0)}</td>
+      <td class="num">R$ ${formatNum(r.perd_rs / 1e6, 2)}M</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+function mmInit() {
+  if (!MULTIMES || MULTIMES.vazio) return;
+  // Bind buttons
+  document.querySelectorAll('.mm-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.mm-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      mmRenderWindow(parseInt(btn.dataset.window));
+    });
+  });
+  // Default: 6 meses
+  mmRenderWindow(6);
+}
+mmInit();
 </script>
 
 </body>
@@ -8165,6 +8581,18 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                   f"{len(mod_mensal_data)} meses, submercados disponiveis: "
                   f"{sorted(set(s for m in mod_mensal_data for s in m['pld_por_sub']))}")
 
+    # ========== ONDA 4A: Comparacao multi-mes ==========
+    multimes = calcular_comparacao_multimes(mauriti.df, diario_m,
+                                                 mod_mensal_data, today)
+    if not multimes.get("vazio"):
+        print(f"[*] Multi-mes: {multimes['n_meses_total']} meses agregados")
+        for jw_key, jw in multimes["janelas"].items():
+            if jw:
+                print(f"    Janela {jw_key}m ({jw['range_label']}): "
+                      f"CF {jw['cf_pct']:.2f}%, mod {jw['desconto_pct']:+.2f}%, "
+                      f"curt {jw['curt_mwh_total']:,.0f} MWh, "
+                      f"perda R$ {jw['perd_rs_total']/1e6:.2f}M")
+
     # ========== MONTHLY FORECAST DATA (v5.6) ==========
     # Substitui o simulador PPA historico por uma projecao do mes corrente:
     # geracao projetada (MTD + media_diaria * dias_restantes), PLD MTD por
@@ -8500,6 +8928,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         anomalias=anomalia_data,
         forecast_proba=forecast_proba,
         cenarios=cenarios,
+        multimes=multimes,
+        multimes_json=json.dumps(multimes, default=str),
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
