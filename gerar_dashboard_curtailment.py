@@ -60,9 +60,11 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.12"
-DASH_VERSION_DATE = "2026-05-19"
+DASH_VERSION = "5.13"
+DASH_VERSION_DATE = "2026-05-25"
 DASH_CHANGES = [
+    "v5.13 (2026-05-25): Onda 4B - ONS Sistema Brasil (Balanço Energia) + "
+    "Termômetro de reservatórios EAR via S3 publico AWS Open Data",
     "v5.12 (2026-05-19): Onda 4A - Nova aba Setor + Comparacao multi-mes "
     "(janelas moveis 3/6/12 meses)",
     "v5.11 (2026-05-19): Onda 3 - Forecast probabilistico P10/P50/P90 + "
@@ -74,7 +76,6 @@ DASH_CHANGES = [
     "v5.8 (2026-05-19): Onda 1 - PLD freshness badge, modo apresentacao, "
     "tooltips, modo dark/light, atalhos teclado, print/screenshot, footer",
     "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
-    "v5.6 (2026-05-17): Monthly forecast (CCEE View + Commercial + 3 cards)",
 ]
 
 CONFIG: dict[str, Any] = {
@@ -727,6 +728,326 @@ def _baixar_pld_dados_abertos(year: int, cfg: dict,
         print(f"  [!] Erro baixando PLD {year} via Dados Abertos: "
               f"{e.__class__.__name__}: {e}")
         return None
+
+
+# =============================================================================
+#  ONDA 4B: ONS Dados Abertos (S3 publico, sem Akamai)
+# =============================================================================
+# Os arquivos do ONS estao hospedados em S3 publico (AWS Open Data).
+# Atualizados diariamente as 12h e 19h BRT.
+# Sem precisar de curl_cffi - request direto.
+
+ONS_S3_BASE = "https://ons-aws-prod-opendata.s3.amazonaws.com/dataset"
+ONS_URL_BALANCO = f"{ONS_S3_BASE}/balanco_energia_subsistema_ho/BALANCO_ENERGIA_SUBSISTEMA_{{year}}.csv"
+ONS_URL_EAR = f"{ONS_S3_BASE}/ear_subsistema_di/EAR_DIARIO_SUBSISTEMA_{{year}}.csv"
+
+
+def _baixar_ons_s3(url: str, dest: Path, timeout: int = 60,
+                       force_redownload: bool = False) -> bool:
+    """Baixa CSV do ONS S3 publico. Retorna True se sucesso, False se falha.
+    Cacheia em dest. Se arquivo existe e nao force, reusa.
+    """
+    if dest.exists() and dest.stat().st_size > 1000 and not force_redownload:
+        return True
+    if force_redownload and dest.exists():
+        dest.unlink()
+    try:
+        # S3 publico - request direto
+        r = requests.get(url, timeout=timeout, allow_redirects=True,
+                            headers={"User-Agent": "Mozilla/5.0 (compatible; "
+                                       "MauritiDashboard/1.0)"})
+        if r.status_code != 200:
+            print(f"  [!] ONS S3 HTTP {r.status_code} pra {url.split('/')[-1]}")
+            return False
+        # Verifica que conteudo eh CSV mesmo
+        if len(r.content) < 1000:
+            print(f"  [!] ONS S3 conteudo curto ({len(r.content)} bytes) - "
+                  f"provavelmente erro: {r.text[:200]}")
+            return False
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        with tmp.open("wb") as f:
+            f.write(r.content)
+        tmp.replace(dest)
+        return True
+    except Exception as e:
+        print(f"  [!] Erro baixando ONS S3 {url.split('/')[-1]}: "
+              f"{e.__class__.__name__}: {e}")
+        return False
+
+
+def carregar_ons_balanco(cfg: dict, year: int) -> pd.DataFrame:
+    """Carrega Balanço de Energia Subsistema (horario) do ONS S3.
+    Retorna DF vazio em caso de erro.
+
+    Schema esperado (do dicionario ONS):
+      - id_subsistema, nom_subsistema
+      - din_instante (timestamp horario)
+      - val_demanda (MWmed)
+      - val_gerhidraulica
+      - val_gertermica
+      - val_gereolica
+      - val_gerfotovoltaica
+      - val_intercambio
+    """
+    cache = _ensure_dir(Path(cfg["cache_dir"]) / "ons")
+    dest = cache / f"balanco_subsistema_{year}.csv"
+    url = ONS_URL_BALANCO.format(year=year)
+    print(f"  Baixando ONS Balanço Energia {year}...")
+    ok = _baixar_ons_s3(url, dest)
+    if not ok:
+        return pd.DataFrame()
+    try:
+        # ONS usa ';' como separador e UTF-8
+        df = pd.read_csv(dest, sep=";", encoding="utf-8",
+                            on_bad_lines="skip")
+        # Normaliza colunas
+        df.columns = [c.lower().strip() for c in df.columns]
+        if "din_instante" in df.columns:
+            df["din_instante"] = pd.to_datetime(df["din_instante"],
+                                                   errors="coerce")
+        # Converte colunas numericas
+        num_cols = ["val_demanda", "val_gerhidraulica", "val_gertermica",
+                      "val_gereolica", "val_gerfotovoltaica",
+                      "val_intercambio"]
+        for c in num_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(
+                    df[c].astype(str).str.replace(",", "."),
+                    errors="coerce").fillna(0)
+        # Filtra so linhas validas
+        df = df.dropna(subset=["din_instante"])
+        return df
+    except Exception as e:
+        print(f"  [!] Erro lendo CSV ONS Balanço: {e.__class__.__name__}: {e}")
+        return pd.DataFrame()
+
+
+def carregar_ons_ear(cfg: dict, year: int) -> pd.DataFrame:
+    """Carrega EAR Diário por Subsistema do ONS S3.
+    Retorna DF vazio em caso de erro.
+
+    Schema esperado (do dicionario ONS):
+      - id_subsistema, nom_subsistema
+      - ear_data (data)
+      - ear_max_subsistema_mwmes
+      - ear_verif_subsistema_mwmes
+      - ear_verif_subsistema_percentual (% atual)
+    """
+    cache = _ensure_dir(Path(cfg["cache_dir"]) / "ons")
+    dest = cache / f"ear_subsistema_{year}.csv"
+    url = ONS_URL_EAR.format(year=year)
+    print(f"  Baixando ONS EAR Subsistema {year}...")
+    ok = _baixar_ons_s3(url, dest)
+    if not ok:
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(dest, sep=";", encoding="utf-8",
+                            on_bad_lines="skip")
+        df.columns = [c.lower().strip() for c in df.columns]
+        if "ear_data" in df.columns:
+            df["ear_data"] = pd.to_datetime(df["ear_data"], errors="coerce")
+        # Converte numericos (separador decimal pode ser ponto ou virgula)
+        num_cols = ["ear_max_subsistema_mwmes", "ear_verif_subsistema_mwmes",
+                      "ear_verif_subsistema_percentual"]
+        for c in num_cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(
+                    df[c].astype(str).str.replace(",", "."),
+                    errors="coerce")
+        df = df.dropna(subset=["ear_data"])
+        return df
+    except Exception as e:
+        print(f"  [!] Erro lendo CSV ONS EAR: {e.__class__.__name__}: {e}")
+        return pd.DataFrame()
+
+
+def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
+                                balanco_anterior: pd.DataFrame = None) -> dict:
+    """Processa dados do Balanço pra mostrar snapshot do Sistema Brasil.
+    Retorna dict com:
+      vazio: bool
+      ultima_data: date
+      total_demanda_mwmed: float  (somando 4 subsistemas)
+      total_geracao_mwmed: float
+      mix: dict (hidraulica/termica/eolica/solar com pct e mwmed)
+      por_subsistema: list of dicts (1 por sub)
+      yoy_demanda: float  (delta % vs mesmo dia ano anterior)
+    """
+    if balanco_atual.empty:
+        return {"vazio": True}
+
+    # Pega o ultimo dia disponivel
+    df = balanco_atual.copy()
+    df["data"] = df["din_instante"].dt.date
+    ultima_data = df["data"].max()
+    df_ultimo = df[df["data"] == ultima_data].copy()
+    if df_ultimo.empty:
+        return {"vazio": True}
+
+    # Agrega media diaria por subsistema
+    agg_cols = ["val_demanda", "val_gerhidraulica", "val_gertermica",
+                  "val_gereolica", "val_gerfotovoltaica"]
+    agg_cols_present = [c for c in agg_cols if c in df_ultimo.columns]
+    por_sub_raw = df_ultimo.groupby("nom_subsistema")[agg_cols_present].mean().reset_index()
+
+    # Total do dia (soma media dos 4 subsistemas)
+    total_demanda = float(por_sub_raw["val_demanda"].sum())
+    total_hidr = float(por_sub_raw.get("val_gerhidraulica",
+                                            pd.Series([0])).sum())
+    total_term = float(por_sub_raw.get("val_gertermica",
+                                            pd.Series([0])).sum())
+    total_eol = float(por_sub_raw.get("val_gereolica",
+                                           pd.Series([0])).sum())
+    total_sol = float(por_sub_raw.get("val_gerfotovoltaica",
+                                           pd.Series([0])).sum())
+    total_ger = total_hidr + total_term + total_eol + total_sol
+
+    if total_ger == 0:
+        return {"vazio": True}
+
+    mix = dict(
+        hidraulica=dict(mwmed=total_hidr,
+                          pct=100 * total_hidr / total_ger),
+        termica=dict(mwmed=total_term, pct=100 * total_term / total_ger),
+        eolica=dict(mwmed=total_eol, pct=100 * total_eol / total_ger),
+        solar=dict(mwmed=total_sol, pct=100 * total_sol / total_ger),
+    )
+    renovavel_pct = mix["hidraulica"]["pct"] + mix["eolica"]["pct"] + mix["solar"]["pct"]
+    nao_renovavel_pct = mix["termica"]["pct"]
+
+    # Por subsistema (lista)
+    por_subsistema = []
+    for _, r in por_sub_raw.iterrows():
+        sub = r["nom_subsistema"]
+        d = float(r.get("val_demanda", 0))
+        h = float(r.get("val_gerhidraulica", 0))
+        t = float(r.get("val_gertermica", 0))
+        e = float(r.get("val_gereolica", 0))
+        s = float(r.get("val_gerfotovoltaica", 0))
+        ger_tot = h + t + e + s
+        por_subsistema.append(dict(
+            sub=sub,
+            demanda_mwmed=d,
+            geracao_mwmed=ger_tot,
+            hidr_pct=100*h/ger_tot if ger_tot > 0 else 0,
+            term_pct=100*t/ger_tot if ger_tot > 0 else 0,
+            eol_pct=100*e/ger_tot if ger_tot > 0 else 0,
+            sol_pct=100*s/ger_tot if ger_tot > 0 else 0,
+        ))
+
+    # YoY: compara mesma data ano anterior
+    yoy_demanda = None
+    if balanco_anterior is not None and not balanco_anterior.empty:
+        try:
+            data_ano_anterior = date(ultima_data.year - 1,
+                                       ultima_data.month, ultima_data.day)
+            df_a = balanco_anterior.copy()
+            df_a["data"] = df_a["din_instante"].dt.date
+            df_ya = df_a[df_a["data"] == data_ano_anterior]
+            if not df_ya.empty:
+                total_demanda_ya = float(df_ya.groupby("nom_subsistema")[
+                    "val_demanda"].mean().sum())
+                if total_demanda_ya > 0:
+                    yoy_demanda = 100 * (total_demanda - total_demanda_ya) / total_demanda_ya
+        except Exception:
+            pass
+
+    return dict(
+        vazio=False,
+        ultima_data=ultima_data.isoformat(),
+        ultima_data_label=ultima_data.strftime("%d/%m/%Y"),
+        total_demanda_mwmed=total_demanda,
+        total_geracao_mwmed=total_ger,
+        mix=mix,
+        renovavel_pct=renovavel_pct,
+        nao_renovavel_pct=nao_renovavel_pct,
+        por_subsistema=por_subsistema,
+        yoy_demanda=yoy_demanda,
+    )
+
+
+def calcular_reservatorios(ear_atual: pd.DataFrame,
+                                ear_anterior: pd.DataFrame = None) -> dict:
+    """Processa EAR Diario pra mostrar termometro de reservatorios.
+    Retorna dict com:
+      vazio: bool
+      ultima_data: str
+      por_subsistema: list (sub, ear_pct, ear_mwmes, ear_max, yoy_delta)
+      total_sin_pct: float (medio ponderado pela capacidade)
+    """
+    if ear_atual.empty:
+        return {"vazio": True}
+
+    df = ear_atual.copy()
+    if "ear_data" not in df.columns or "ear_verif_subsistema_percentual" not in df.columns:
+        return {"vazio": True}
+
+    ultima_data_ts = df["ear_data"].max()
+    if pd.isna(ultima_data_ts):
+        return {"vazio": True}
+    ultima_data = ultima_data_ts.date()
+    df_ultimo = df[df["ear_data"] == ultima_data_ts].copy()
+    if df_ultimo.empty:
+        return {"vazio": True}
+
+    # Por subsistema
+    por_sub = []
+    total_max = 0.0
+    total_verif = 0.0
+    for _, r in df_ultimo.iterrows():
+        sub = r["nom_subsistema"]
+        pct = float(r.get("ear_verif_subsistema_percentual", 0) or 0)
+        verif = float(r.get("ear_verif_subsistema_mwmes", 0) or 0)
+        max_ear = float(r.get("ear_max_subsistema_mwmes", 0) or 0)
+
+        # YoY mesmo dia ano anterior
+        yoy_pct = None
+        yoy_delta = None
+        if ear_anterior is not None and not ear_anterior.empty:
+            try:
+                data_ya = date(ultima_data.year - 1,
+                                  ultima_data.month, ultima_data.day)
+                df_a = ear_anterior.copy()
+                ya = df_a[(df_a["ear_data"].dt.date == data_ya) &
+                            (df_a["nom_subsistema"] == sub)]
+                if not ya.empty:
+                    yoy_pct = float(ya.iloc[0].get(
+                        "ear_verif_subsistema_percentual", 0))
+                    yoy_delta = pct - yoy_pct
+            except Exception:
+                pass
+
+        # Status: high / medium / low (gauge style)
+        if pct >= 70:
+            status = "high"  # cheio
+        elif pct >= 40:
+            status = "medium"  # ok
+        else:
+            status = "low"  # baixo (preocupante)
+
+        por_sub.append(dict(
+            sub=sub,
+            ear_pct=pct,
+            ear_mwmes=verif,
+            ear_max=max_ear,
+            yoy_pct=yoy_pct,
+            yoy_delta=yoy_delta,
+            status=status,
+        ))
+        total_max += max_ear
+        total_verif += verif
+
+    total_sin_pct = 100 * total_verif / total_max if total_max > 0 else 0
+
+    return dict(
+        vazio=False,
+        ultima_data=ultima_data.isoformat(),
+        ultima_data_label=ultima_data.strftime("%d/%m/%Y"),
+        por_subsistema=por_sub,
+        total_sin_pct=total_sin_pct,
+        total_sin_mwmes=total_verif,
+        total_sin_max=total_max,
+    )
 
 
 def carregar_pld(cfg: dict, dt_ini: date, dt_fim: date,
@@ -3907,6 +4228,96 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .setor-soon strong{color:var(--ink);letter-spacing:0.05em;
   font-family:'IBM Plex Sans',sans-serif}
 
+/* ===== ONDA 4B.1: Sistema Brasil ===== */
+.sb-period,.res-period{font-size:12px;color:var(--ink-2);
+  margin:10px 0 18px;padding:10px 14px;background:var(--bg-alt);
+  border-left:3px solid var(--accent);border-radius:2px;
+  display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  font-family:'IBM Plex Mono',monospace}
+.sb-period strong,.res-period strong{color:var(--ink);
+  letter-spacing:0.08em;text-transform:uppercase;font-size:10px;
+  font-weight:600;font-family:'IBM Plex Sans',sans-serif}
+.sb-period .neg,.res-period .neg{color:var(--accent-today)}
+.sb-period .pos,.res-period .pos{color:var(--ok)}
+.res-num{color:var(--accent);font-weight:600}
+
+.sb-mix-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:24px;margin:16px 0}
+.sb-mix-headline{display:grid;grid-template-columns:1fr 1fr;gap:24px;
+  margin-bottom:16px;padding-bottom:16px;
+  border-bottom:1px solid var(--border)}
+.sb-renew,.sb-fossil{text-align:center}
+.sb-tiny{font-size:10px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;font-weight:600;margin-bottom:6px}
+.sb-pct{font-family:'Fraunces',Georgia,serif;font-size:32px;
+  font-weight:500;line-height:1}
+.sb-pct.pos{color:var(--ok)}
+.sb-pct.neg{color:var(--accent-today)}
+.sb-mix-bar{display:flex;height:24px;border-radius:3px;overflow:hidden;
+  background:var(--bg-alt);margin:14px 0}
+.sb-mix-slice{height:100%;transition:width 0.3s}
+.sb-mix-slice.hidro{background:#2d5a7d}
+.sb-mix-slice.eolica{background:#5db978}
+.sb-mix-slice.solar{background:#d4a017}
+.sb-mix-slice.termica{background:#a8442f}
+.sb-mix-legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 16px;
+  font-size:12px;color:var(--ink-2)}
+.sb-leg-item{display:flex;gap:6px;align-items:center;
+  font-family:'IBM Plex Mono',monospace;font-size:11px}
+.sb-leg-item strong{color:var(--ink);font-weight:600;
+  font-family:'IBM Plex Sans',sans-serif;font-size:13px}
+.sb-leg-num{color:var(--muted)}
+.sb-dot{width:10px;height:10px;border-radius:2px}
+.sb-dot.hidro{background:#2d5a7d}
+.sb-dot.eolica{background:#5db978}
+.sb-dot.solar{background:#d4a017}
+.sb-dot.termica{background:#a8442f}
+.sb-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+.sb-table th{font-size:10px;color:var(--muted);letter-spacing:0.12em;
+  text-transform:uppercase;font-weight:600;text-align:left;
+  padding:8px;border-bottom:1px solid var(--border2);background:var(--bg-alt)}
+.sb-table th.num{text-align:right}
+.sb-table td{padding:8px;border-bottom:1px solid var(--border);
+  color:var(--ink-2)}
+.sb-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.sb-table tr:last-child td{border-bottom:none}
+@media (max-width:720px){.sb-mix-headline{grid-template-columns:1fr}}
+
+/* ===== ONDA 4B.2: Reservatórios ===== */
+.res-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;
+  margin:18px 0}
+.res-cell{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:18px;text-align:center;
+  display:flex;flex-direction:column;align-items:center;gap:8px}
+.res-cell.res-high{border-top:3px solid var(--ok)}
+.res-cell.res-medium{border-top:3px solid var(--warn)}
+.res-cell.res-low{border-top:3px solid var(--accent-today)}
+.res-sub{font-size:11px;color:var(--muted);letter-spacing:0.1em;
+  text-transform:uppercase;font-weight:600}
+.res-meter{width:36px;height:80px;background:var(--bg-alt);
+  border-radius:4px;position:relative;overflow:hidden;
+  display:flex;align-items:flex-end;border:1px solid var(--border2)}
+.res-meter-fill{width:100%;transition:height 0.5s ease-out;
+  background:linear-gradient(to top,#2d5a7d,#4a7ba0)}
+.res-cell.res-low .res-meter-fill{
+  background:linear-gradient(to top,#a8442f,#d57255)}
+.res-cell.res-medium .res-meter-fill{
+  background:linear-gradient(to top,#d4a017,#e8b73e)}
+.res-pct{font-family:'Fraunces',Georgia,serif;font-size:26px;
+  font-weight:500;color:var(--ink);line-height:1;margin-top:2px}
+.res-yoy{font-size:11px;font-family:'IBM Plex Mono',monospace;
+  color:var(--muted);padding:2px 8px;border-radius:10px;
+  background:var(--bg-alt)}
+.res-yoy.pos{color:var(--ok);background:#dff5e8}
+.res-yoy.neg{color:var(--accent-today);background:#fce4e0}
+.res-tiny{font-size:9px;color:var(--muted);
+  font-family:'IBM Plex Mono',monospace;line-height:1.3}
+.res-prose{font-size:13px;color:var(--ink-2);line-height:1.6;
+  padding:14px;background:var(--bg-alt);border-left:3px solid var(--accent);
+  border-radius:2px;margin:14px 0}
+.res-prose strong{color:var(--ink)}
+@media (max-width:720px){.res-grid{grid-template-columns:repeat(2,1fr)}}
+
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   font-family:'IBM Plex Sans',Georgia,serif;
@@ -6380,13 +6791,185 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
     {% endif %}
 
-    <!-- Placeholder for future sections (5.1, 5.2 in Onda 4B) -->
+    <!-- ========================================================= -->
+    <!-- ONDA 4B.1: Painel Sistema Brasil                           -->
+    <!-- ========================================================= -->
+    {% if sistema_brasil and not sistema_brasil.vazio %}
+    <div class="section-head">
+      <span class="num">II.</span>
+      <h3 data-i18n="sb_title">Brazilian power system snapshot</h3>
+      <span class="tag" data-i18n="sb_tag">SIN · LATEST DAY</span>
+    </div>
+    <p class="section-desc" data-i18n="sb_desc">
+      Daily snapshot of the Brazilian Interconnected Power System (SIN): total
+      demand and generation mix by source (hydro/thermal/wind/solar). Source:
+      ONS Balanço de Energia by subsystem.
+    </p>
+
+    <div class="sb-period">
+      <strong data-i18n="sb_date">Data from:</strong>
+      <span>{{ sistema_brasil.ultima_data_label }}</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="sb_demand">Total demand</strong>:
+        {{ "{:,.0f}".format(sistema_brasil.total_demanda_mwmed).replace(",", " ") }} MWmed</span>
+      {% if sistema_brasil.yoy_demanda is not none %}
+      <span class="razao-period-sep">·</span>
+      <span><strong>YoY</strong>:
+        <span class="{% if sistema_brasil.yoy_demanda < 0 %}neg{% else %}pos{% endif %}">
+          {{ "%+.2f"|format(sistema_brasil.yoy_demanda) }}%
+        </span>
+      </span>
+      {% endif %}
+    </div>
+
+    <div class="sb-mix-card">
+      <div class="sb-mix-headline">
+        <div class="sb-renew">
+          <div class="sb-tiny" data-i18n="sb_renewable">Renewable (hydro + wind + solar)</div>
+          <div class="sb-pct pos">{{ "%.1f"|format(sistema_brasil.renovavel_pct) }}%</div>
+        </div>
+        <div class="sb-fossil">
+          <div class="sb-tiny" data-i18n="sb_thermal">Thermal</div>
+          <div class="sb-pct neg">{{ "%.1f"|format(sistema_brasil.nao_renovavel_pct) }}%</div>
+        </div>
+      </div>
+
+      <div class="sb-mix-bar">
+        {% set h = sistema_brasil.mix.hidraulica.pct %}
+        {% set t = sistema_brasil.mix.termica.pct %}
+        {% set e = sistema_brasil.mix.eolica.pct %}
+        {% set s = sistema_brasil.mix.solar.pct %}
+        <div class="sb-mix-slice hidro" style="width:{{ "%.2f"|format(h) }}%" title="Hidráulica {{ '%.1f'|format(h) }}%"></div>
+        <div class="sb-mix-slice eolica" style="width:{{ "%.2f"|format(e) }}%" title="Eólica {{ '%.1f'|format(e) }}%"></div>
+        <div class="sb-mix-slice solar" style="width:{{ "%.2f"|format(s) }}%" title="Solar {{ '%.1f'|format(s) }}%"></div>
+        <div class="sb-mix-slice termica" style="width:{{ "%.2f"|format(t) }}%" title="Térmica {{ '%.1f'|format(t) }}%"></div>
+      </div>
+
+      <div class="sb-mix-legend">
+        <div class="sb-leg-item"><span class="sb-dot hidro"></span>
+          <span data-i18n="sb_hydro">Hydro</span>
+          <strong>{{ "%.1f"|format(sistema_brasil.mix.hidraulica.pct) }}%</strong>
+          <span class="sb-leg-num">({{ "{:,.0f}".format(sistema_brasil.mix.hidraulica.mwmed).replace(",", " ") }} MW)</span>
+        </div>
+        <div class="sb-leg-item"><span class="sb-dot eolica"></span>
+          <span data-i18n="sb_wind">Wind</span>
+          <strong>{{ "%.1f"|format(sistema_brasil.mix.eolica.pct) }}%</strong>
+          <span class="sb-leg-num">({{ "{:,.0f}".format(sistema_brasil.mix.eolica.mwmed).replace(",", " ") }} MW)</span>
+        </div>
+        <div class="sb-leg-item"><span class="sb-dot solar"></span>
+          <span data-i18n="sb_solar">Solar</span>
+          <strong>{{ "%.1f"|format(sistema_brasil.mix.solar.pct) }}%</strong>
+          <span class="sb-leg-num">({{ "{:,.0f}".format(sistema_brasil.mix.solar.mwmed).replace(",", " ") }} MW)</span>
+        </div>
+        <div class="sb-leg-item"><span class="sb-dot termica"></span>
+          <span data-i18n="sb_therm">Thermal</span>
+          <strong>{{ "%.1f"|format(sistema_brasil.mix.termica.pct) }}%</strong>
+          <span class="sb-leg-num">({{ "{:,.0f}".format(sistema_brasil.mix.termica.mwmed).replace(",", " ") }} MW)</span>
+        </div>
+      </div>
+
+      <table class="sb-table">
+        <thead>
+          <tr>
+            <th data-i18n="sb_th_sub">Subsystem</th>
+            <th class="num" data-i18n="sb_th_dem">Demand (MWmed)</th>
+            <th class="num" data-i18n="sb_th_gen">Generation (MWmed)</th>
+            <th class="num" data-i18n="sb_th_hydro">Hydro</th>
+            <th class="num" data-i18n="sb_th_therm">Thermal</th>
+            <th class="num" data-i18n="sb_th_wind">Wind</th>
+            <th class="num" data-i18n="sb_th_solar">Solar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for sub in sistema_brasil.por_subsistema %}
+          <tr>
+            <td><strong>{{ sub.sub }}</strong></td>
+            <td class="num">{{ "{:,.0f}".format(sub.demanda_mwmed).replace(",", " ") }}</td>
+            <td class="num">{{ "{:,.0f}".format(sub.geracao_mwmed).replace(",", " ") }}</td>
+            <td class="num">{{ "%.1f"|format(sub.hidr_pct) }}%</td>
+            <td class="num">{{ "%.1f"|format(sub.term_pct) }}%</td>
+            <td class="num">{{ "%.1f"|format(sub.eol_pct) }}%</td>
+            <td class="num">{{ "%.1f"|format(sub.sol_pct) }}%</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    <!-- ========================================================= -->
+    <!-- ONDA 4B.2: Termômetro de reservatórios ONS                 -->
+    <!-- ========================================================= -->
+    {% if reservatorios and not reservatorios.vazio %}
+    <div class="section-head">
+      <span class="num">III.</span>
+      <h3 data-i18n="res_title">Reservoir thermometer · Stored Energy (EAR)</h3>
+      <span class="tag" data-i18n="res_tag">HYDRO RESERVE</span>
+    </div>
+    <p class="section-desc" data-i18n="res_desc">
+      Daily reservoir level by subsystem. The Stored Energy (EAR) represents the
+      potential generation from the water currently available in hydro
+      reservoirs. Low levels typically anticipate higher PLD spot prices and
+      more curtailment of solar/wind in subsequent months.
+    </p>
+
+    <div class="res-period">
+      <strong data-i18n="res_date">Data from:</strong>
+      <span>{{ reservatorios.ultima_data_label }}</span>
+      <span class="razao-period-sep">·</span>
+      <span><strong data-i18n="res_total_sin">SIN total</strong>:
+        <span class="res-num">{{ "%.1f"|format(reservatorios.total_sin_pct) }}%</span>
+        ({{ "{:,.0f}".format(reservatorios.total_sin_mwmes).replace(",", " ") }} /
+         {{ "{:,.0f}".format(reservatorios.total_sin_max).replace(",", " ") }} MWmes)
+      </span>
+    </div>
+
+    <div class="res-grid">
+      {% for sub in reservatorios.por_subsistema %}
+      <div class="res-cell res-{{ sub.status }}">
+        <div class="res-sub">{{ sub.sub }}</div>
+        <div class="res-meter">
+          <div class="res-meter-fill" style="height:{{ "%.0f"|format(sub.ear_pct) }}%"></div>
+        </div>
+        <div class="res-pct">{{ "%.1f"|format(sub.ear_pct) }}%</div>
+        {% if sub.yoy_delta is not none %}
+        <div class="res-yoy {% if sub.yoy_delta < 0 %}neg{% else %}pos{% endif %}">
+          YoY {{ "%+.1f"|format(sub.yoy_delta) }}pp
+        </div>
+        {% else %}
+        <div class="res-yoy">YoY N/A</div>
+        {% endif %}
+        <div class="res-tiny">
+          {{ "{:,.0f}".format(sub.ear_mwmes).replace(",", " ") }} /
+          {{ "{:,.0f}".format(sub.ear_max).replace(",", " ") }} MWmes
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <p class="res-prose">
+      {% set total_pct = reservatorios.total_sin_pct %}
+      {% if total_pct >= 70 %}
+        <strong data-i18n="res_high">Reservoirs are high</strong>
+        <span data-i18n="res_high_p">— low PLD expected, less pressure for curtailment of solar/wind in coming months.</span>
+      {% elif total_pct >= 40 %}
+        <strong data-i18n="res_med">Reservoirs at moderate level</strong>
+        <span data-i18n="res_med_p">— PLD likely stable, no extra curtailment pressure.</span>
+      {% else %}
+        <strong data-i18n="res_low">Reservoirs are low</strong>
+        <span data-i18n="res_low_p">— elevated PLD expected, hydro scarcity historically correlates with higher solar/wind curtailment due to network constraints.</span>
+      {% endif %}
+    </p>
+    {% endif %}
+
+    {% if (not sistema_brasil or sistema_brasil.vazio) and (not reservatorios or reservatorios.vazio) %}
     <div class="setor-placeholder">
       <p class="setor-soon">
-        <strong data-i18n="setor_soon">🚧 Coming next:</strong>
-        <span data-i18n="setor_soon_p">Brazilian system panel (SIN load, renewable generation) and reservoir thermometer (ONS Energy Stored by submarket) will be added in the next wave.</span>
+        <strong>⚠</strong>
+        <span data-i18n="setor_ons_unavail">ONS open data temporarily unavailable. Brazilian system panel and reservoir thermometer will appear here when ONS endpoints respond. They are usually published daily at 12h and 19h BRT.</span>
       </p>
     </div>
+    {% endif %}
 
   </div><!-- /tab setor -->
 
@@ -6973,7 +7556,38 @@ const I18N = {
     mm_th_pld_eff: "PLD ef (R$/MWh)",
     mm_th_loss: "Perda (R$)",
     setor_soon: "🚧 Próximas etapas:",
-    setor_soon_p: "Painel Sistema Brasil (carga SIN, geração renovável) e termômetro de reservatórios (Energia Armazenada por submercado pelo ONS) serão adicionados na próxima onda."
+    setor_soon_p: "Painel Sistema Brasil (carga SIN, geração renovável) e termômetro de reservatórios (Energia Armazenada por submercado pelo ONS) serão adicionados na próxima onda.",
+    // ===== ONDA 4B =====
+    sb_title: "Snapshot do Sistema Elétrico Brasileiro",
+    sb_tag: "SIN · ÚLTIMO DIA",
+    sb_desc: "Snapshot diário do Sistema Interligado Nacional (SIN): demanda total e mix de geração por fonte (hídrica/térmica/eólica/solar). Fonte: Balanço de Energia por Subsistema do ONS.",
+    sb_date: "Dados de:",
+    sb_demand: "Demanda total",
+    sb_renewable: "Renovável (hídrica + eólica + solar)",
+    sb_thermal: "Térmica",
+    sb_hydro: "Hídrica",
+    sb_wind: "Eólica",
+    sb_solar: "Solar",
+    sb_therm: "Térmica",
+    sb_th_sub: "Subsistema",
+    sb_th_dem: "Demanda (MWmed)",
+    sb_th_gen: "Geração (MWmed)",
+    sb_th_hydro: "Hídrica",
+    sb_th_therm: "Térmica",
+    sb_th_wind: "Eólica",
+    sb_th_solar: "Solar",
+    res_title: "Termômetro de reservatórios · Energia Armazenada (EAR)",
+    res_tag: "RESERVA HÍDRICA",
+    res_desc: "Nível diário dos reservatórios por subsistema. A Energia Armazenada (EAR) representa a geração potencial a partir da água atualmente disponível nos reservatórios hidrelétricos. Níveis baixos tipicamente antecipam preços PLD spot maiores e mais curtailment de solar/eólica nos meses seguintes.",
+    res_date: "Dados de:",
+    res_total_sin: "SIN total",
+    res_high: "Reservatórios cheios",
+    res_high_p: "— PLD baixo esperado, menos pressão para curtailment de solar/eólica nos próximos meses.",
+    res_med: "Reservatórios em nível moderado",
+    res_med_p: "— PLD provavelmente estável, sem pressão extra para curtailment.",
+    res_low: "Reservatórios baixos",
+    res_low_p: "— PLD elevado esperado, escassez hídrica historicamente correlaciona com maior curtailment de solar/eólica devido a restrições de rede.",
+    setor_ons_unavail: "Dados abertos do ONS temporariamente indisponíveis. O painel do Sistema Brasil e o termômetro de reservatórios aparecerão aqui quando os endpoints do ONS responderem. São publicados diariamente às 12h e 19h BRT."
   }
 };
 
@@ -8593,6 +9207,31 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                       f"curt {jw['curt_mwh_total']:,.0f} MWh, "
                       f"perda R$ {jw['perd_rs_total']/1e6:.2f}M")
 
+    # ========== ONDA 4B: Sistema Brasil + Reservatorios ==========
+    sistema_brasil = calcular_sistema_brasil(ons_balanco_atual,
+                                                  ons_balanco_anterior)
+    if not sistema_brasil.get("vazio"):
+        sb = sistema_brasil
+        print(f"[*] Sistema Brasil ({sb['ultima_data_label']}): "
+              f"Demanda {sb['total_demanda_mwmed']:,.0f} MWmed, "
+              f"Renovavel {sb['renovavel_pct']:.0f}%, "
+              f"Termica {sb['nao_renovavel_pct']:.0f}%")
+        for k, v in sb["mix"].items():
+            print(f"    {k:11s}: {v['mwmed']:8,.0f} MWmed ({v['pct']:.1f}%)")
+        if sb.get("yoy_demanda") is not None:
+            print(f"    YoY demanda: {sb['yoy_demanda']:+.2f}%")
+
+    reservatorios = calcular_reservatorios(ons_ear_atual, ons_ear_anterior)
+    if not reservatorios.get("vazio"):
+        rs = reservatorios
+        print(f"[*] Reservatorios EAR ({rs['ultima_data_label']}): "
+              f"SIN {rs['total_sin_pct']:.1f}%")
+        for sub in rs["por_subsistema"]:
+            yoy_txt = (f" (YoY {sub['yoy_delta']:+.1f}pp)"
+                         if sub.get('yoy_delta') is not None else "")
+            print(f"    {sub['sub']:15s}: {sub['ear_pct']:5.1f}% "
+                  f"({sub['status']}){yoy_txt}")
+
     # ========== MONTHLY FORECAST DATA (v5.6) ==========
     # Substitui o simulador PPA historico por uma projecao do mes corrente:
     # geracao projetada (MTD + media_diaria * dias_restantes), PLD MTD por
@@ -8930,6 +9569,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         cenarios=cenarios,
         multimes=multimes,
         multimes_json=json.dumps(multimes, default=str),
+        sistema_brasil=sistema_brasil,
+        reservatorios=reservatorios,
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
@@ -9121,6 +9762,27 @@ def main() -> None:
     except Exception as e:
         print(f"  [!] NASA POWER falhou: {e.__class__.__name__}: {e}")
         irradiancia = pd.DataFrame(columns=["hora", "ghi", "temp"])
+
+    # ONDA 4B: ONS Dados Abertos (Balanço energia + EAR reservatórios)
+    # S3 publico - falhas nao quebram o pipeline.
+    print("\n[4.5/4] ONS Dados Abertos (Balanço energia + EAR)...")
+    ons_balanco_atual = pd.DataFrame()
+    ons_balanco_anterior = pd.DataFrame()
+    ons_ear_atual = pd.DataFrame()
+    ons_ear_anterior = pd.DataFrame()
+    try:
+        ano_atual = date.today().year
+        ons_balanco_atual = carregar_ons_balanco(cfg, ano_atual)
+        ons_balanco_anterior = carregar_ons_balanco(cfg, ano_atual - 1)
+        ons_ear_atual = carregar_ons_ear(cfg, ano_atual)
+        ons_ear_anterior = carregar_ons_ear(cfg, ano_atual - 1)
+        if not ons_balanco_atual.empty:
+            print(f"  Balanço {ano_atual}: {len(ons_balanco_atual):,} linhas")
+        if not ons_ear_atual.empty:
+            print(f"  EAR {ano_atual}: {len(ons_ear_atual):,} linhas")
+    except Exception as e:
+        print(f"  [!] ONS Dados Abertos falhou: "
+              f"{e.__class__.__name__}: {e}")
 
     print("\n[4/4] Enriquecendo + selecionando grupos...")
     df = enriquecer(detalhe, cons, pld)
