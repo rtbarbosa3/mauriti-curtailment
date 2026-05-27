@@ -8814,7 +8814,20 @@ mmInit();
 def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                 ne_horario: pd.DataFrame, irradiancia: pd.DataFrame,
                 pld_sub: str, periodo: str, output: Path, today: date,
-                cfg: dict) -> None:
+                cfg: dict,
+                ons_balanco_atual: pd.DataFrame = None,
+                ons_balanco_anterior: pd.DataFrame = None,
+                ons_ear_atual: pd.DataFrame = None,
+                ons_ear_anterior: pd.DataFrame = None) -> None:
+    # Defaults se nao passados (back-compat)
+    if ons_balanco_atual is None:
+        ons_balanco_atual = pd.DataFrame()
+    if ons_balanco_anterior is None:
+        ons_balanco_anterior = pd.DataFrame()
+    if ons_ear_atual is None:
+        ons_ear_atual = pd.DataFrame()
+    if ons_ear_anterior is None:
+        ons_ear_anterior = pd.DataFrame()
     met_m = metricas(mauriti.df)
     bench_df = (pd.concat([g.df for g in grupos], ignore_index=True)
                 if grupos else pd.DataFrame())
@@ -9798,7 +9811,11 @@ def main() -> None:
     out = Path(cfg["output_html"]).resolve()
     periodo = f"{dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}"
     gerar_html(mauriti, grupos, pld, ne_horario, irradiancia,
-                cfg["submercado"], periodo, out, date.today(), cfg)
+                cfg["submercado"], periodo, out, date.today(), cfg,
+                ons_balanco_atual=ons_balanco_atual,
+                ons_balanco_anterior=ons_balanco_anterior,
+                ons_ear_atual=ons_ear_atual,
+                ons_ear_anterior=ons_ear_anterior)
     print(f"\n[OK] Dashboard salvo em: {out}")
     print(f"     Para preview local: abra '{out}' no navegador.")
     print(f"     Para publicar: ./public/ esta pronto pra deploy (GitHub Pages).")
