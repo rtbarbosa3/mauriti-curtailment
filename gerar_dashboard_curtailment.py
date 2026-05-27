@@ -815,7 +815,12 @@ def carregar_ons_balanco(cfg: dict, year: int) -> pd.DataFrame:
                     df[c].astype(str).str.replace(",", "."),
                     errors="coerce").fillna(0)
         # Filtra so linhas validas
-        df = df.dropna(subset=["din_instante"])
+        if "din_instante" in df.columns:
+            df = df.dropna(subset=["din_instante"])
+        elif col := _find_col(df, ["din_instante", "data", "datetime"]):
+            df = df.dropna(subset=[col])
+        print(f"  [debug] ONS balanco {year}: {len(df):,} linhas, "
+              f"colunas: {list(df.columns)[:10]}")
         return df
     except Exception as e:
         print(f"  [!] Erro lendo CSV ONS Balanço: {e.__class__.__name__}: {e}")
@@ -854,16 +859,34 @@ def carregar_ons_ear(cfg: dict, year: int) -> pd.DataFrame:
                 df[c] = pd.to_numeric(
                     df[c].astype(str).str.replace(",", "."),
                     errors="coerce")
-        df = df.dropna(subset=["ear_data"])
+        if "ear_data" in df.columns:
+            df = df.dropna(subset=["ear_data"])
+        elif col := _find_col(df, ["ear_data", "din_referencia", "data"]):
+            df = df.dropna(subset=[col])
+        print(f"  [debug] ONS EAR {year}: {len(df):,} linhas, "
+              f"colunas: {list(df.columns)[:10]}")
         return df
     except Exception as e:
         print(f"  [!] Erro lendo CSV ONS EAR: {e.__class__.__name__}: {e}")
         return pd.DataFrame()
 
 
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Procura o primeiro nome de coluna que existe no DF, dentre candidates.
+    Comparação case-insensitive e tolerante a espaços.
+    """
+    lower_cols = {c.lower().strip(): c for c in df.columns}
+    for cand in candidates:
+        if cand.lower() in lower_cols:
+            return lower_cols[cand.lower()]
+    return None
+
+
 def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
                                 balanco_anterior: pd.DataFrame = None) -> dict:
     """Processa dados do Balanço pra mostrar snapshot do Sistema Brasil.
+    Robusto a variacoes de nome de coluna do ONS.
+
     Retorna dict com:
       vazio: bool
       ultima_data: date
@@ -876,33 +899,68 @@ def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
     if balanco_atual.empty:
         return {"vazio": True}
 
-    # Pega o ultimo dia disponivel
+    # Descobre nomes reais das colunas (ONS pode variar)
+    col_data = _find_col(balanco_atual, ["din_instante", "data", "datetime"])
+    col_sub = _find_col(balanco_atual, ["nom_subsistema", "id_subsistema",
+                                              "subsistema"])
+    col_dem = _find_col(balanco_atual, [
+        "val_demanda", "val_cargaenergiahomwmed", "val_cargaenergia",
+        "val_carga", "carga", "demanda", "val_cargagerada",
+    ])
+    col_hidr = _find_col(balanco_atual, [
+        "val_gerhidraulica", "val_geracaohidraulica", "val_gerhidr",
+        "ger_hidraulica", "hidraulica",
+    ])
+    col_term = _find_col(balanco_atual, [
+        "val_gertermica", "val_geracaotermica", "val_gerterm",
+        "ger_termica", "termica",
+    ])
+    col_eol = _find_col(balanco_atual, [
+        "val_gereolica", "val_geracaoeolica", "val_gereol",
+        "ger_eolica", "eolica",
+    ])
+    col_sol = _find_col(balanco_atual, [
+        "val_gerfotovoltaica", "val_geracaofotovoltaica",
+        "val_gerfotov", "val_gersolar", "fotovoltaica", "solar",
+    ])
+
+    print(f"  [debug] ONS balanco columns mapped: data='{col_data}', "
+          f"sub='{col_sub}', dem='{col_dem}', hidr='{col_hidr}', "
+          f"term='{col_term}', eol='{col_eol}', sol='{col_sol}'")
+
+    if col_data is None or col_sub is None:
+        print(f"  [!] ONS balanco: schema incompativel. "
+              f"Colunas disponiveis: {list(balanco_atual.columns)[:15]}")
+        return {"vazio": True}
+
     df = balanco_atual.copy()
-    df["data"] = df["din_instante"].dt.date
+    df["data"] = df[col_data].dt.date
     ultima_data = df["data"].max()
     df_ultimo = df[df["data"] == ultima_data].copy()
     if df_ultimo.empty:
         return {"vazio": True}
 
     # Agrega media diaria por subsistema
-    agg_cols = ["val_demanda", "val_gerhidraulica", "val_gertermica",
-                  "val_gereolica", "val_gerfotovoltaica"]
-    agg_cols_present = [c for c in agg_cols if c in df_ultimo.columns]
-    por_sub_raw = df_ultimo.groupby("nom_subsistema")[agg_cols_present].mean().reset_index()
+    agg_cols = [c for c in [col_dem, col_hidr, col_term, col_eol, col_sol]
+                  if c is not None]
+    if not agg_cols:
+        print(f"  [!] ONS balanco: nenhuma coluna de valor identificada")
+        return {"vazio": True}
 
-    # Total do dia (soma media dos 4 subsistemas)
-    total_demanda = float(por_sub_raw["val_demanda"].sum())
-    total_hidr = float(por_sub_raw.get("val_gerhidraulica",
-                                            pd.Series([0])).sum())
-    total_term = float(por_sub_raw.get("val_gertermica",
-                                            pd.Series([0])).sum())
-    total_eol = float(por_sub_raw.get("val_gereolica",
-                                           pd.Series([0])).sum())
-    total_sol = float(por_sub_raw.get("val_gerfotovoltaica",
-                                           pd.Series([0])).sum())
+    por_sub_raw = df_ultimo.groupby(col_sub)[agg_cols].mean().reset_index()
+
+    # Total do dia (soma media dos 4 subsistemas) - usa col_xxx ou 0
+    def _col_sum(col):
+        return float(por_sub_raw[col].sum()) if col and col in por_sub_raw.columns else 0.0
+    total_demanda = _col_sum(col_dem)
+    total_hidr = _col_sum(col_hidr)
+    total_term = _col_sum(col_term)
+    total_eol = _col_sum(col_eol)
+    total_sol = _col_sum(col_sol)
     total_ger = total_hidr + total_term + total_eol + total_sol
 
     if total_ger == 0:
+        print(f"  [!] ONS balanco: total geracao = 0, pulando")
         return {"vazio": True}
 
     mix = dict(
@@ -916,14 +974,20 @@ def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
     nao_renovavel_pct = mix["termica"]["pct"]
 
     # Por subsistema (lista)
+    def _row_val(row, col):
+        try:
+            return float(row[col]) if col and col in row.index else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
     por_subsistema = []
     for _, r in por_sub_raw.iterrows():
-        sub = r["nom_subsistema"]
-        d = float(r.get("val_demanda", 0))
-        h = float(r.get("val_gerhidraulica", 0))
-        t = float(r.get("val_gertermica", 0))
-        e = float(r.get("val_gereolica", 0))
-        s = float(r.get("val_gerfotovoltaica", 0))
+        sub = r[col_sub]
+        d = _row_val(r, col_dem)
+        h = _row_val(r, col_hidr)
+        t = _row_val(r, col_term)
+        e = _row_val(r, col_eol)
+        s = _row_val(r, col_sol)
         ger_tot = h + t + e + s
         por_subsistema.append(dict(
             sub=sub,
@@ -937,20 +1001,31 @@ def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
 
     # YoY: compara mesma data ano anterior
     yoy_demanda = None
-    if balanco_anterior is not None and not balanco_anterior.empty:
+    if (balanco_anterior is not None and not balanco_anterior.empty
+            and col_dem is not None):
         try:
             data_ano_anterior = date(ultima_data.year - 1,
                                        ultima_data.month, ultima_data.day)
-            df_a = balanco_anterior.copy()
-            df_a["data"] = df_a["din_instante"].dt.date
-            df_ya = df_a[df_a["data"] == data_ano_anterior]
-            if not df_ya.empty:
-                total_demanda_ya = float(df_ya.groupby("nom_subsistema")[
-                    "val_demanda"].mean().sum())
-                if total_demanda_ya > 0:
-                    yoy_demanda = 100 * (total_demanda - total_demanda_ya) / total_demanda_ya
-        except Exception:
-            pass
+            col_data_a = _find_col(balanco_anterior, ["din_instante", "data",
+                                                            "datetime"])
+            col_sub_a = _find_col(balanco_anterior, ["nom_subsistema",
+                                                           "id_subsistema",
+                                                           "subsistema"])
+            col_dem_a = _find_col(balanco_anterior, [
+                "val_demanda", "val_cargaenergiahomwmed", "val_cargaenergia",
+                "val_carga", "carga", "demanda", "val_cargagerada",
+            ])
+            if col_data_a and col_sub_a and col_dem_a:
+                df_a = balanco_anterior.copy()
+                df_a["data"] = df_a[col_data_a].dt.date
+                df_ya = df_a[df_a["data"] == data_ano_anterior]
+                if not df_ya.empty:
+                    total_demanda_ya = float(df_ya.groupby(col_sub_a)[
+                        col_dem_a].mean().sum())
+                    if total_demanda_ya > 0:
+                        yoy_demanda = 100 * (total_demanda - total_demanda_ya) / total_demanda_ya
+        except Exception as e:
+            print(f"  [!] YoY balanco falhou: {e.__class__.__name__}: {e}")
 
     return dict(
         vazio=False,
@@ -969,6 +1044,8 @@ def calcular_sistema_brasil(balanco_atual: pd.DataFrame,
 def calcular_reservatorios(ear_atual: pd.DataFrame,
                                 ear_anterior: pd.DataFrame = None) -> dict:
     """Processa EAR Diario pra mostrar termometro de reservatorios.
+    Robusto a variacoes de schema do ONS.
+
     Retorna dict com:
       vazio: bool
       ultima_data: str
@@ -978,15 +1055,36 @@ def calcular_reservatorios(ear_atual: pd.DataFrame,
     if ear_atual.empty:
         return {"vazio": True}
 
-    df = ear_atual.copy()
-    if "ear_data" not in df.columns or "ear_verif_subsistema_percentual" not in df.columns:
+    # Descobre nomes reais das colunas
+    col_data = _find_col(ear_atual, ["ear_data", "din_referencia", "data"])
+    col_sub = _find_col(ear_atual, ["nom_subsistema", "id_subsistema",
+                                          "subsistema"])
+    col_pct = _find_col(ear_atual, [
+        "ear_verif_subsistema_percentual", "ear_pct", "ear_percentual",
+        "percentual_ear", "ear_verificada_percentual",
+    ])
+    col_mwmes = _find_col(ear_atual, [
+        "ear_verif_subsistema_mwmes", "ear_mwmes", "ear_verificada_mwmes",
+    ])
+    col_max = _find_col(ear_atual, [
+        "ear_max_subsistema_mwmes", "ear_max_mwmes", "ear_maxima_mwmes",
+    ])
+
+    print(f"  [debug] ONS EAR columns mapped: data='{col_data}', "
+          f"sub='{col_sub}', pct='{col_pct}', mwmes='{col_mwmes}', "
+          f"max='{col_max}'")
+
+    if col_data is None or col_sub is None or col_pct is None:
+        print(f"  [!] ONS EAR: schema incompativel. "
+              f"Colunas disponiveis: {list(ear_atual.columns)}")
         return {"vazio": True}
 
-    ultima_data_ts = df["ear_data"].max()
+    df = ear_atual.copy()
+    ultima_data_ts = df[col_data].max()
     if pd.isna(ultima_data_ts):
         return {"vazio": True}
     ultima_data = ultima_data_ts.date()
-    df_ultimo = df[df["ear_data"] == ultima_data_ts].copy()
+    df_ultimo = df[df[col_data] == ultima_data_ts].copy()
     if df_ultimo.empty:
         return {"vazio": True}
 
@@ -995,10 +1093,19 @@ def calcular_reservatorios(ear_atual: pd.DataFrame,
     total_max = 0.0
     total_verif = 0.0
     for _, r in df_ultimo.iterrows():
-        sub = r["nom_subsistema"]
-        pct = float(r.get("ear_verif_subsistema_percentual", 0) or 0)
-        verif = float(r.get("ear_verif_subsistema_mwmes", 0) or 0)
-        max_ear = float(r.get("ear_max_subsistema_mwmes", 0) or 0)
+        sub = r[col_sub]
+        try:
+            pct = float(r.get(col_pct, 0) or 0)
+        except (ValueError, TypeError):
+            pct = 0.0
+        try:
+            verif = float(r.get(col_mwmes, 0) or 0) if col_mwmes else 0.0
+        except (ValueError, TypeError):
+            verif = 0.0
+        try:
+            max_ear = float(r.get(col_max, 0) or 0) if col_max else 0.0
+        except (ValueError, TypeError):
+            max_ear = 0.0
 
         # YoY mesmo dia ano anterior
         yoy_pct = None
@@ -1007,13 +1114,24 @@ def calcular_reservatorios(ear_atual: pd.DataFrame,
             try:
                 data_ya = date(ultima_data.year - 1,
                                   ultima_data.month, ultima_data.day)
-                df_a = ear_anterior.copy()
-                ya = df_a[(df_a["ear_data"].dt.date == data_ya) &
-                            (df_a["nom_subsistema"] == sub)]
-                if not ya.empty:
-                    yoy_pct = float(ya.iloc[0].get(
-                        "ear_verif_subsistema_percentual", 0))
-                    yoy_delta = pct - yoy_pct
+                col_data_a = _find_col(ear_anterior, ["ear_data",
+                                                            "din_referencia",
+                                                            "data"])
+                col_sub_a = _find_col(ear_anterior, ["nom_subsistema",
+                                                           "id_subsistema",
+                                                           "subsistema"])
+                col_pct_a = _find_col(ear_anterior, [
+                    "ear_verif_subsistema_percentual", "ear_pct",
+                    "ear_percentual", "percentual_ear",
+                    "ear_verificada_percentual",
+                ])
+                if col_data_a and col_sub_a and col_pct_a:
+                    df_a = ear_anterior.copy()
+                    ya = df_a[(df_a[col_data_a].dt.date == data_ya) &
+                                (df_a[col_sub_a] == sub)]
+                    if not ya.empty:
+                        yoy_pct = float(ya.iloc[0].get(col_pct_a, 0))
+                        yoy_delta = pct - yoy_pct
             except Exception:
                 pass
 
