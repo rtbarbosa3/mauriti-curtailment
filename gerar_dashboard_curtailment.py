@@ -60,9 +60,14 @@ import plotly.io as pio
 # =============================================================================
 
 # Versao do dashboard. Atualizar a cada onda de mudancas.
-DASH_VERSION = "5.13"
-DASH_VERSION_DATE = "2026-05-25"
+DASH_VERSION = "5.15"
+DASH_VERSION_DATE = "2026-05-27"
 DASH_CHANGES = [
+    "v5.15 (2026-05-27): Nova aba Monthly drill-down - seletor de mes "
+    "com KPIs, razao, tabela diaria, top dias, insights e deltas vs mes anterior",
+    "v5.14 (2026-05-27): Refresh visual Versao B - Inter + JetBrains Mono, "
+    "hero compacto, secoes numeradas 01-10, KPI cards border-top, "
+    "tabular-nums, mais respiro vertical",
     "v5.13 (2026-05-25): Onda 4B - ONS Sistema Brasil (Balanço Energia) + "
     "Termômetro de reservatórios EAR via S3 publico AWS Open Data",
     "v5.12 (2026-05-19): Onda 4A - Nova aba Setor + Comparacao multi-mes "
@@ -73,9 +78,6 @@ DASH_CHANGES = [
     "(Mauriti vs NE), deteccao anomalia geracao",
     "v5.9 (2026-05-19): Onda 2A - YoY modulation, In/Out-the-money, "
     "breakdown REL/CNF/ENE/PAR com periodo + tooltips",
-    "v5.8 (2026-05-19): Onda 1 - PLD freshness badge, modo apresentacao, "
-    "tooltips, modo dark/light, atalhos teclado, print/screenshot, footer",
-    "v5.7 (2026-05-19): TLS fingerprint Chrome 131 via curl_cffi pra bypass Akamai/CCEE",
 ]
 
 CONFIG: dict[str, Any] = {
@@ -1894,7 +1896,7 @@ def g_donut_curtailment_razao(df_razao: pd.DataFrame) -> go.Figure:
         marker=dict(colors=colors, line=dict(color="#fafaf6", width=2)),
         textposition="outside",
         textinfo="label+percent",
-        textfont=dict(family="IBM Plex Sans", size=11),
+        textfont=dict(family="Inter", size=11),
         hovertemplate="<b>%{label}</b><br>" +
                        "%{value:,.0f} MWh (%{percent})<br>" +
                        "<extra></extra>",
@@ -1906,7 +1908,7 @@ def g_donut_curtailment_razao(df_razao: pd.DataFrame) -> go.Figure:
         text=f"<b>{total_mwh:,.0f}</b><br>"
               f"<span style='font-size:10px;color:#857d72'>MWh total</span>",
         x=0.5, y=0.5, showarrow=False,
-        font=dict(family="IBM Plex Sans", size=18, color="#1a1715"),
+        font=dict(family="Inter", size=18, color="#1a1715"),
     )
     fig.update_layout(
         margin=dict(t=20, b=20, l=20, r=20),
@@ -2012,18 +2014,18 @@ def g_heatmap_perda_rs(data: dict) -> go.Figure:
                        "Perda: R$ %{z:,.0f}<extra></extra>",
         colorbar=dict(
             title=dict(text="R$ perdidos", side="right",
-                          font=dict(family="IBM Plex Sans", size=11)),
-            tickfont=dict(family="IBM Plex Mono", size=10),
+                          font=dict(family="Inter", size=11)),
+            tickfont=dict(family="JetBrains Mono", size=10),
             len=0.8, thickness=12,
         ),
     ))
 
     fig.update_layout(
         xaxis=dict(title="Dia do mês", side="bottom",
-                      tickfont=dict(family="IBM Plex Mono", size=10)),
+                      tickfont=dict(family="JetBrains Mono", size=10)),
         yaxis=dict(title="Hora do dia", autorange="reversed",
-                      tickfont=dict(family="IBM Plex Mono", size=10)),
-        font=dict(family="IBM Plex Sans", size=11, color="#1a1715"),
+                      tickfont=dict(family="JetBrains Mono", size=10)),
+        font=dict(family="Inter", size=11, color="#1a1715"),
         margin=dict(t=20, b=40, l=60, r=80),
         height=460,
         paper_bgcolor="rgba(0,0,0,0)",
@@ -2580,6 +2582,266 @@ def calcular_comparacao_multimes(mauriti_df: pd.DataFrame,
 
 
 
+# =============================================================================
+#  Monthly Drill-down: detalhe completo de cada mes para a aba "Monthly"
+# =============================================================================
+
+def calcular_drilldown_mensal(mauriti_df: pd.DataFrame,
+                                   diario_m: pd.DataFrame,
+                                   mod_mensal_data: list,
+                                   today: date) -> dict:
+    """Para cada mes disponivel, calcula um snapshot detalhado:
+    - KPIs principais (MWh, R$, CF%, modulacao)
+    - Curtailment por razao (REL/CNF/ENE/PAR)
+    - Tabela diaria (1 linha por dia)
+    - Heatmap dia x hora (matriz)
+    - Pareto top dias mais dolorosos
+    - Insights: pior dia, melhor dia, % dias com curtailment alto
+    - Comparacao com mes anterior (deltas)
+
+    Returns:
+      {
+        "vazio": bool,
+        "meses": list of dicts, ordered chronologically (newest first),
+        "default_mes": str (most recent),
+      }
+    """
+    if mauriti_df.empty:
+        return {"vazio": True}
+
+    df = mauriti_df.copy()
+    df["mes_period"] = df["din_instante"].dt.to_period("M")
+    df["mes_str"] = df["mes_period"].astype(str)
+    df["data"] = df["din_instante"].dt.date
+    df["hora"] = df["din_instante"].dt.hour
+
+    # Dicionario mod_mensal_data por mes
+    mod_dict = {m["month"]: m for m in (mod_mensal_data or [])}
+
+    # Mapeamento de razoes (mesmo dos outros lugares)
+    razao_labels = {
+        "REL": "Restrição elétrica externa",
+        "CNF": "Reserva de confiabilidade",
+        "ENE": "Excesso de oferta (energético)",
+        "PAR": "Parecer de acesso",
+    }
+
+    # Pega todos os meses disponiveis
+    meses_str = sorted(set(df["mes_str"]))
+    meses_data = []
+
+    # Para calculo de deltas, vou processar cronologicamente e guardar previous
+    meses_calc_temp = []
+
+    for mes_str in meses_str:
+        try:
+            year, month = mes_str.split("-")
+            mes_date = date(int(year), int(month), 1)
+        except (ValueError, AttributeError):
+            continue
+        if mes_date > today:
+            continue
+
+        df_mes = df[df["mes_str"] == mes_str].copy()
+        if df_mes.empty:
+            continue
+
+        # Label do mes
+        meses_lbl = ["jan", "feb", "mar", "apr", "may", "jun",
+                       "jul", "aug", "sep", "oct", "nov", "dec"]
+        month_label = f"{meses_lbl[mes_date.month-1]}/{str(mes_date.year)[2:]}"
+
+        # --- KPIs principais ---
+        md = mod_dict.get(mes_str, {})
+        mwh_total = float(md.get("mwh_total", 0))
+        receita_real = float(md.get("receita_real", 0))
+        receita_flat = float(md.get("receita_flat", 0))
+        desconto_pct = (100 * (receita_real - receita_flat) / receita_flat
+                          if receita_flat > 0 else 0)
+        pld_efetivo = float(md.get("pld_efetivo", 0))
+        pld_spot = float(md.get("pld_medio_ne", 0))
+        n_dias = int(md.get("n_dias", 0))
+
+        # Curtailment do mes
+        curt_mwh = float(df_mes["curtailment_mwh"].sum())
+        estim_mwh = float(df_mes["estimada_mwh"].sum()) if "estimada_mwh" in df_mes.columns else 0
+        cf_pct = 100 * curt_mwh / estim_mwh if estim_mwh > 0 else 0
+
+        # Perda em R$ (curtailment * PLD horario)
+        perd_rs = 0.0
+        if "pld" in df_mes.columns:
+            df_mes_curt = df_mes[df_mes["curtailment_mwh"] > 0].copy()
+            df_mes_curt["perd_rs"] = df_mes_curt["curtailment_mwh"] * df_mes_curt["pld"].fillna(0)
+            perd_rs = float(df_mes_curt["perd_rs"].sum())
+
+        # --- Curtailment por razao ---
+        razao_dict = {}
+        if "cod_razaorestricao" in df_mes.columns:
+            df_curt = df_mes[df_mes["curtailment_mwh"] > 0]
+            if not df_curt.empty:
+                grp_rz = df_curt.groupby("cod_razaorestricao").agg(
+                    mwh=("curtailment_mwh", "sum"),
+                    n_horas=("curtailment_mwh", "count"),
+                )
+                total_rz = grp_rz["mwh"].sum()
+                for codigo in ["REL", "CNF", "ENE", "PAR"]:
+                    if codigo in grp_rz.index:
+                        razao_dict[codigo] = {
+                            "mwh": float(grp_rz.loc[codigo, "mwh"]),
+                            "pct": float(100 * grp_rz.loc[codigo, "mwh"] / total_rz) if total_rz > 0 else 0,
+                            "n_horas": int(grp_rz.loc[codigo, "n_horas"]),
+                            "label": razao_labels[codigo],
+                        }
+                    else:
+                        razao_dict[codigo] = {"mwh": 0, "pct": 0, "n_horas": 0,
+                                                "label": razao_labels[codigo]}
+                # Desconhecida (resto)
+                conhecidas = sum(razao_dict[c]["mwh"] for c in razao_dict)
+                desc_mwh = max(0, float(total_rz) - conhecidas)
+                desc_pct = 100 * desc_mwh / float(total_rz) if total_rz > 0 else 0
+                razao_dict["DESCONHECIDA"] = {
+                    "mwh": float(desc_mwh), "pct": float(desc_pct),
+                    "n_horas": 0, "label": "Sem classificação ONS",
+                }
+
+        # --- Tabela diaria ---
+        diaria_df = df_mes.groupby("data").agg(
+            curt_mwh=("curtailment_mwh", "sum"),
+            gen_mwh=("gerada_mwh", "sum") if "gerada_mwh" in df_mes.columns else ("curtailment_mwh", "sum"),
+            estim_mwh=("estimada_mwh", "sum") if "estimada_mwh" in df_mes.columns else ("curtailment_mwh", "sum"),
+        ).reset_index()
+        if "pld" in df_mes.columns:
+            df_perd = df_mes.copy()
+            df_perd["perd_rs"] = df_perd["curtailment_mwh"] * df_perd["pld"].fillna(0)
+            perd_diaria = df_perd.groupby("data")["perd_rs"].sum().reset_index()
+            diaria_df = diaria_df.merge(perd_diaria, on="data", how="left")
+        else:
+            diaria_df["perd_rs"] = 0
+        # PLD medio do dia
+        if "pld" in df_mes.columns:
+            pld_dia = df_mes.groupby("data")["pld"].mean().reset_index()
+            pld_dia.columns = ["data", "pld_med"]
+            diaria_df = diaria_df.merge(pld_dia, on="data", how="left")
+        else:
+            diaria_df["pld_med"] = 0
+        # CF% diario
+        diaria_df["cf_pct"] = diaria_df.apply(
+            lambda r: 100*r["curt_mwh"]/r["estim_mwh"] if r["estim_mwh"] > 0 else 0,
+            axis=1)
+        diaria_rows = []
+        for _, r in diaria_df.iterrows():
+            diaria_rows.append({
+                "dia": r["data"].day,
+                "data_iso": r["data"].isoformat(),
+                "gen_mwh": float(r["gen_mwh"]),
+                "curt_mwh": float(r["curt_mwh"]),
+                "cf_pct": float(r["cf_pct"]),
+                "perd_rs": float(r["perd_rs"]) if pd.notna(r["perd_rs"]) else 0,
+                "pld_med": float(r["pld_med"]) if pd.notna(r["pld_med"]) else 0,
+            })
+
+        # --- Heatmap dia x hora (perda R$) ---
+        heatmap_z = []
+        if "pld" in df_mes.columns:
+            n_dias_mes = (date(mes_date.year, mes_date.month + 1, 1)
+                            - timedelta(days=1)).day if mes_date.month < 12 \
+                else 31
+            df_mes_curt = df_mes[df_mes["curtailment_mwh"] > 0].copy()
+            df_mes_curt["perd_rs_h"] = df_mes_curt["curtailment_mwh"] * df_mes_curt["pld"].fillna(0)
+            df_mes_curt["dia"] = df_mes_curt["din_instante"].dt.day
+            heatmap_pivot = df_mes_curt.pivot_table(
+                index="hora", columns="dia", values="perd_rs_h",
+                aggfunc="sum", fill_value=0)
+            # Garante todas as 24 horas
+            for h in range(24):
+                if h not in heatmap_pivot.index:
+                    heatmap_pivot.loc[h] = [0] * len(heatmap_pivot.columns)
+            heatmap_pivot = heatmap_pivot.sort_index()
+            # Garante todos os dias do mes
+            for d in range(1, n_dias_mes + 1):
+                if d not in heatmap_pivot.columns:
+                    heatmap_pivot[d] = 0
+            heatmap_pivot = heatmap_pivot.reindex(sorted(heatmap_pivot.columns), axis=1)
+            heatmap_z = heatmap_pivot.values.tolist()
+
+        # --- Pareto: top 10 dias mais dolorosos ---
+        top_dias = sorted(diaria_rows,
+                            key=lambda r: r["perd_rs"], reverse=True)[:10]
+
+        # --- Insights derivados ---
+        pior_dia = max(diaria_rows, key=lambda r: r["perd_rs"]) if diaria_rows else None
+        melhor_dia = min(diaria_rows, key=lambda r: r["perd_rs"]) if diaria_rows else None
+        n_dias_curt_alto = sum(1 for r in diaria_rows if r["cf_pct"] > 10)
+        pct_dias_curt_alto = (100 * n_dias_curt_alto / len(diaria_rows)
+                                if diaria_rows else 0)
+
+        meses_calc_temp.append({
+            "mes_str": mes_str,
+            "mes_date": mes_date.isoformat(),
+            "month_label": month_label,
+            "n_dias": n_dias,
+            "is_parcial": (mes_str == today.strftime("%Y-%m")),
+            "is_complete": (mes_str != today.strftime("%Y-%m")),
+            # KPIs
+            "mwh_total": mwh_total,
+            "curt_mwh": curt_mwh,
+            "estim_mwh": estim_mwh,
+            "cf_pct": cf_pct,
+            "perd_rs": perd_rs,
+            "receita_real": receita_real,
+            "receita_flat": receita_flat,
+            "desconto_pct": desconto_pct,
+            "pld_efetivo": pld_efetivo,
+            "pld_spot": pld_spot,
+            # Razao
+            "razao": razao_dict,
+            # Diaria
+            "diaria": diaria_rows,
+            # Heatmap
+            "heatmap_z": heatmap_z,
+            # Top dias
+            "top_dias": top_dias,
+            # Insights
+            "pior_dia": pior_dia,
+            "melhor_dia": melhor_dia,
+            "n_dias_curt_alto": n_dias_curt_alto,
+            "pct_dias_curt_alto": pct_dias_curt_alto,
+            "n_dias_total": len(diaria_rows),
+        })
+
+    # --- Adiciona deltas vs mes anterior ---
+    for i, m in enumerate(meses_calc_temp):
+        if i == 0:
+            m["delta"] = None
+        else:
+            prev = meses_calc_temp[i - 1]
+            def _delta(curr, prev):
+                if prev == 0:
+                    return None
+                return 100 * (curr - prev) / abs(prev)
+            m["delta"] = {
+                "mwh_total_pct": _delta(m["mwh_total"], prev["mwh_total"]),
+                "curt_mwh_pct": _delta(m["curt_mwh"], prev["curt_mwh"]),
+                "cf_pct_pp": m["cf_pct"] - prev["cf_pct"],
+                "perd_rs_pct": _delta(m["perd_rs"], prev["perd_rs"]),
+                "desconto_pp": m["desconto_pct"] - prev["desconto_pct"],
+                "pld_spot_pct": _delta(m["pld_spot"], prev["pld_spot"]),
+                "prev_label": prev["month_label"],
+            }
+
+    # Reverse: mais recente primeiro (default selection)
+    meses_calc_temp.reverse()
+
+    default_mes = meses_calc_temp[0]["mes_str"] if meses_calc_temp else None
+
+    return {
+        "vazio": False,
+        "meses": meses_calc_temp,
+        "default_mes": default_mes,
+        "n_meses": len(meses_calc_temp),
+    }
+
+
 def eventos_elegiveis_ren1030(df_mauriti: pd.DataFrame) -> pd.DataFrame:
     """Filtra cortes do Mauriti que sao elegiveis a ressarcimento sob a
     REN 1.030/2022 -- razoes REL (indisponibilidade externa) e CNF
@@ -2843,21 +3105,21 @@ EL = {
 
 LAY = dict(
     paper_bgcolor=EL["panel"], plot_bgcolor=EL["panel"],
-    font=dict(family="'IBM Plex Sans',Georgia,serif", color=EL["ink"], size=12),
+    font=dict(family="'Inter',sans-serif", color=EL["ink"], size=12),
     margin=dict(l=60, r=30, t=60, b=50),
     legend=dict(orientation="h", y=-0.20,
-                font=dict(family="'IBM Plex Mono',monospace", size=11)),
+                font=dict(family="'JetBrains Mono',monospace", size=11)),
     xaxis=dict(gridcolor=EL["border"], zerolinecolor=EL["border2"],
                 linecolor=EL["border2"], tickcolor=EL["border2"]),
     yaxis=dict(gridcolor=EL["border"], zerolinecolor=EL["border2"],
                 linecolor=EL["border2"], tickcolor=EL["border2"]),
-    hoverlabel=dict(font_family="'IBM Plex Mono',monospace",
+    hoverlabel=dict(font_family="'JetBrains Mono',monospace",
                      bgcolor=EL["panel"], bordercolor=EL["accent"]),
 )
 
 def ed_title(text: str, size: int = 20):
     return dict(text=text, x=0, xanchor="left",
-                font=dict(family="'Fraunces',Georgia,serif", size=size,
+                font=dict(family="'Inter',sans-serif", size=size,
                           color=EL["ink"]))
 
 
@@ -2999,7 +3261,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
                              symbol="circle"),
                 text=["today"],
                 textposition="top center",
-                textfont=dict(family="'IBM Plex Mono'", size=10,
+                textfont=dict(family="'JetBrains Mono'", size=10,
                               color="#1a1a1a"),
                 name="today",
                 hoverinfo="skip",
@@ -3022,7 +3284,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
                 ax=-50, ay=-40,
                 bgcolor="#fafaf6", borderpad=6, borderwidth=1,
                 bordercolor=EL["accent_today"],
-                font=dict(family="'IBM Plex Mono'", size=10,
+                font=dict(family="'JetBrains Mono'", size=10,
                           color=EL["accent_today"]),
             )
 
@@ -3032,7 +3294,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
             line=dict(color=EL["neutral"], width=1.5, dash="dash"),
             annotation_text=f"  prior-quarter avg: {ref_cf:.1f}%",
             annotation_position="top right",
-            annotation=dict(font=dict(family="'IBM Plex Mono',monospace",
+            annotation=dict(font=dict(family="'JetBrains Mono',monospace",
                                        size=10, color=EL["neutral"]),
                               bgcolor="rgba(250,250,246,0.85)",
                               borderpad=3))
@@ -3045,7 +3307,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
 
     lay = dict(LAY); lay.update(
         title=dict(
-            text=(f"<span style='font-size:20px;font-family:Fraunces,serif;"
+            text=(f"<span style='font-size:20px;font-family:'Inter',sans-serif;"
                   f"color:#1a1715'>Mauriti — {mes_capitalized}  ·  "
                   f"realized vs curtailed per day</span>"
                   f"<br>{subtitle}"),
@@ -3053,7 +3315,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
         ),
         barmode="stack",
         xaxis=dict(title="", gridcolor=EL["border"],
-                    tickfont=dict(family="'IBM Plex Mono',monospace", size=10)),
+                    tickfont=dict(family="'JetBrains Mono',monospace", size=10)),
         yaxis=dict(title="MWh / day", gridcolor=EL["border"]),
         yaxis2=dict(title="CF% of the day", overlaying="y", side="right",
                      showgrid=False, color=EL["accent_today"],
@@ -3063,7 +3325,7 @@ def g_tracker(df_mauriti: pd.DataFrame, today: date | None = None):
         hovermode="x unified", height=480, bargap=0.30,
         margin=dict(l=70, r=110, t=90, b=60),
         legend=dict(orientation="h", y=-0.20,
-                     font=dict(family="'IBM Plex Mono',monospace", size=11)),
+                     font=dict(family="'JetBrains Mono',monospace", size=11)),
     )
     fig.update_layout(**lay)
     return fig, daily_full, ref_cf, days_in_month
@@ -3108,7 +3370,7 @@ def g_donut_razao(df, titulo):
         values=soma.values, hole=0.62,
         marker=dict(colors=[cores.get(c, EL["muted"]) for c in soma.index],
                     line=dict(color=EL["panel"], width=3)),
-        textinfo="percent", textfont=dict(family="'IBM Plex Mono'",
+        textinfo="percent", textfont=dict(family="'JetBrains Mono'",
                                             size=12, color=EL["panel"]),
         hovertemplate="<b>%{label}</b><br>%{value:,.1f} MWh (%{percent})<extra></extra>",
     ))
@@ -3116,7 +3378,7 @@ def g_donut_razao(df, titulo):
     lay = dict(LAY); lay.update(
         title=ed_title(titulo, 20),
         annotations=[dict(
-            text=(f"<b style='font-family:Fraunces,Georgia,serif;"
+            text=(f"<b style='font-family:'Inter',sans-serif;"
                    f"font-size:32px'>{total/1000:,.1f}</b>"
                    f"<br><span style='color:{EL['muted']};font-size:11px;"
                    "letter-spacing:0.1em'>GWh CORTADOS</span>"),
@@ -3204,7 +3466,7 @@ def g_comp_cf(mdf, grupos: list[Grupo]):
         xaxis=dict(title="", gridcolor=EL["border"]),
         hovermode="x unified", height=460,
         legend=dict(orientation="v", x=1.02, y=1, yanchor="top", xanchor="left",
-                     font=dict(family="'IBM Plex Mono',monospace", size=10),
+                     font=dict(family="'JetBrains Mono',monospace", size=10),
                      bgcolor="rgba(0,0,0,0)"),
         margin=dict(l=60, r=200, t=60, b=50),
     )
@@ -3295,7 +3557,7 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
                              symbol="circle"),
                 text=["today"],
                 textposition="top center",
-                textfont=dict(family="'IBM Plex Mono'", size=10,
+                textfont=dict(family="'JetBrains Mono'", size=10,
                               color="#1a1a1a", weight="bold"),
                 name="today",
                 hoverinfo="skip",
@@ -3319,7 +3581,7 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
                 ax=40, ay=30,
                 bgcolor="#fafaf6", borderpad=6, borderwidth=1,
                 bordercolor=EL["accent_today"],
-                font=dict(family="'IBM Plex Mono'", size=10,
+                font=dict(family="'JetBrains Mono'", size=10,
                           color=EL["accent_today"]),
             )
 
@@ -3329,7 +3591,7 @@ def g_mod_tracker(diario_m: pd.DataFrame, ref_pct_ne: float | None,
             line=dict(color=EL["neutral"], width=1.2, dash="dot"),
             annotation_text=f"  benchmark NE: {ref_pct_ne:.1f}%",
             annotation_position="top right",
-            annotation=dict(font=dict(family="'IBM Plex Mono',monospace",
+            annotation=dict(font=dict(family="'JetBrains Mono',monospace",
                                        size=10, color=EL["neutral"])))
 
     lay = dict(LAY); lay.update(
@@ -3379,7 +3641,7 @@ def g_mod_perfil_horario(perfil_m: pd.DataFrame):
                      side="right", showgrid=False, color=EL["accent"]),
         hovermode="x unified", height=420,
         legend=dict(orientation="h", y=-0.18,
-                     font=dict(family="'IBM Plex Mono',monospace", size=11)),
+                     font=dict(family="'JetBrains Mono',monospace", size=11)),
     )
     fig.update_layout(**lay); return fig
 
@@ -3444,7 +3706,7 @@ def g_mod_top_dias(diario_m: pd.DataFrame, n: int = 10):
                                     top["pld_avg"])],
         textposition="outside",
         textfont=dict(color=EL["ink_2"], size=10,
-                      family="'IBM Plex Mono',monospace"),
+                      family="'JetBrains Mono',monospace"),
         hovertemplate="<b>%{y}</b><br>Perdido: R$ %{x:,.0f}<extra></extra>",
     ))
     lay = dict(LAY); lay.update(
@@ -3475,7 +3737,7 @@ def g_heatmap_horario(df_mauriti):
                      [1.0, "#5e1d10"]],
         colorbar=dict(title=dict(text="CF%", font=dict(size=11)),
                        outlinewidth=0, ticksuffix="%",
-                       tickfont=dict(family="'IBM Plex Mono'", size=10)),
+                       tickfont=dict(family="'JetBrains Mono'", size=10)),
         zmax=min(80, float(z.values.max()) if z.size > 0 else 80), zmin=0,
         hovertemplate="Dia %{x}  Hora %{y}h<br>CF: %{z:.1f}%<extra></extra>",
     ))
@@ -3559,7 +3821,7 @@ def g_ren_origem(eventos: pd.DataFrame):
         marker=dict(color=cores_bar, line=dict(width=0)),
         text=texto, textposition="outside",
         textfont=dict(color=EL["ink_2"], size=10,
-                       family="'IBM Plex Mono',monospace"),
+                       family="'JetBrains Mono',monospace"),
         hovertemplate="<b>%{y}</b><br>%{x:,.1f} MWh<extra></extra>",
         cliponaxis=False,
     ))
@@ -3572,7 +3834,7 @@ def g_ren_origem(eventos: pd.DataFrame):
               f"{total_evt} events"),
         bgcolor=EL["bg_alt"], bordercolor=EL["border"], borderwidth=1,
         borderpad=6,
-        font=dict(family="'IBM Plex Mono',monospace", size=11,
+        font=dict(family="'JetBrains Mono',monospace", size=11,
                    color=EL["ink"]),
     )
 
@@ -3581,7 +3843,7 @@ def g_ren_origem(eventos: pd.DataFrame):
         xaxis=dict(title="MWh", gridcolor=EL["border"],
                     range=[0, total_mwh * 0.85]),  # espaco pro texto
         yaxis=dict(gridcolor=EL["border"],
-                    tickfont=dict(family="'IBM Plex Mono',monospace",
+                    tickfont=dict(family="'JetBrains Mono',monospace",
                                    size=11, color=EL["ink"])),
         height=max(300, 42 * len(by_origem) + 100),
         margin=dict(l=260, r=200, t=90, b=50),  # mais top space pro total
@@ -3615,7 +3877,7 @@ def g_irrad_scatter(cruz: pd.DataFrame):
         text=[f"CF {cf:.1f}%<br>{n}h" for cf, n in
               zip(by_bin["cf"], by_bin["n_horas"])],
         textposition="outside",
-        textfont=dict(family="'IBM Plex Mono',monospace", size=10,
+        textfont=dict(family="'JetBrains Mono',monospace", size=10,
                        color=EL["ink_2"]),
         hovertemplate=("<b>GHI %{x} W/m²</b><br>"
                         "CF: %{y:.2f}%<extra></extra>"),
@@ -3677,7 +3939,7 @@ def g_irrad_perfil(cruz: pd.DataFrame):
                      side="right", showgrid=False, color=EL["accent"]),
         hovermode="x unified", height=400,
         legend=dict(orientation="h", y=-0.18,
-                     font=dict(family="'IBM Plex Mono',monospace", size=11)),
+                     font=dict(family="'JetBrains Mono',monospace", size=11)),
     )
     fig.update_layout(**lay); return fig
 
@@ -3735,12 +3997,12 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
         z=z_arr, x=x_lab, y=cf_pivot.index,
         text=text_matrix,
         texttemplate="%{text}",
-        textfont=dict(family="'IBM Plex Mono', monospace",
+        textfont=dict(family="'JetBrains Mono', monospace",
                        size=10, color="#1a1a1a"),
         colorscale=colorscale,
         colorbar=dict(title=dict(text="CF%", font=dict(size=11)),
                        outlinewidth=0, ticksuffix="%",
-                       tickfont=dict(family="'IBM Plex Mono'", size=10)),
+                       tickfont=dict(family="'JetBrains Mono'", size=10)),
         zmax=zmax_val, zmin=0,
         xgap=1, ygap=1,  # linhas finas entre celulas, ajuda leitura
         hovertemplate="<b>%{x} %{y}h</b><br>CF: %{z:.1f}%<extra></extra>",
@@ -3760,7 +4022,7 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
                     x=x_lab[ix], y=hora,
                     text=f"<b>{v:.0f}</b>",
                     showarrow=False,
-                    font=dict(family="'IBM Plex Mono', monospace",
+                    font=dict(family="'JetBrains Mono', monospace",
                               size=10, color="#fafaf6"),
                 )
 
@@ -3786,7 +4048,7 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
         showarrow=False,
         xanchor="left", yanchor="middle",
         xshift=12, textangle=90,
-        font=dict(family="'IBM Plex Mono'", size=9, color="#1a1a1a"),
+        font=dict(family="'JetBrains Mono'", size=9, color="#1a1a1a"),
     )
 
     # Worst cell highlight — destaca a pior celula com setinha
@@ -3806,7 +4068,7 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
                 ax=60, ay=-40,
                 bgcolor="#fafaf6", borderpad=6, borderwidth=1,
                 bordercolor=EL["accent_today"],
-                font=dict(family="'IBM Plex Mono'", size=10,
+                font=dict(family="'JetBrains Mono'", size=10,
                           color=EL["accent_today"]),
             )
 
@@ -3818,7 +4080,7 @@ def g_heatmap_dow_hora(cf_pivot: pd.DataFrame):
 
     lay = dict(LAY); lay.update(
         title=dict(
-            text=(f"<span style='font-size:20px;font-family:Fraunces,serif;"
+            text=(f"<span style='font-size:20px;font-family:'Inter',sans-serif;"
                   f"color:#1a1715'>Weekday × hour heatmap — weekly pattern</span>"
                   f"<br>{subtitle}"),
             x=0.02, xanchor="left", y=0.97
@@ -3897,7 +4159,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
 :root{
@@ -3905,7 +4167,8 @@ HTML_TEMPLATE = r"""<!doctype html>
   --border:#e6e1d4; --border2:#d8d2c2;
   --ink:#1a1715; --ink-2:#3d3833; --muted:#857d72;
   --rule:#c8c0ad; --accent:#a8442f; --accent-2:#7a4528;
-  --accent-today:#d92e0f; --neutral:#5a5147; --ok:#2d5a3d;
+  --accent-soft:#f5e8e3; --accent-today:#d92e0f;
+  --neutral:#5a5147; --ok:#2d5a3d;
   --warn:#d4a017;
 }
 
@@ -3915,7 +4178,8 @@ html[data-theme="dark"]{
   --border:#3d3833; --border2:#4a443c;
   --ink:#fafaf6; --ink-2:#e6e1d4; --muted:#a09689;
   --rule:#4a443c; --accent:#d57255; --accent-2:#b85a3d;
-  --accent-today:#ff5a3a; --neutral:#a09689; --ok:#5db978;
+  --accent-soft:#3d2620; --accent-today:#ff5a3a;
+  --neutral:#a09689; --ok:#5db978;
   --warn:#e8b73e;
 }
 
@@ -3957,7 +4221,7 @@ html[data-theme="dark"]{
   font-size:11px;font-weight:400;line-height:1.4;letter-spacing:0;
   text-transform:none;white-space:normal;width:260px;z-index:1500;
   box-shadow:0 4px 12px rgba(0,0,0,0.2);
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
 
 /* ===== Modo apresentacao (fullscreen) ===== */
 html[data-mode="present"] .toolbar,
@@ -3968,7 +4232,7 @@ html[data-mode="present"] .wrap{max-width:none;padding:24px 48px}
 html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 
 /* ===== Versao + changelog ===== */
-.version-info{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.version-info{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);margin-top:8px}
 .version-info code{background:var(--bg-alt);padding:2px 6px;
   border-radius:2px;color:var(--accent)}
@@ -3977,7 +4241,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .changelog-toggle:hover{color:var(--accent)}
 .changelog-list{font-size:10px;line-height:1.7;margin:8px 0 0 16px;
   list-style:none;padding:0;color:var(--muted)}
-.changelog-list li{margin-bottom:2px;font-family:'IBM Plex Mono',monospace}
+.changelog-list li{margin-bottom:2px;font-family:'JetBrains Mono',monospace}
 
 /* ===== Credits no footer ===== */
 .credits{font-size:10px;color:var(--muted);line-height:1.6;
@@ -4002,16 +4266,16 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .yoy-cell{text-align:center;display:flex;flex-direction:column;gap:6px;align-items:center}
 .yoy-label{font-size:10px;color:var(--muted);letter-spacing:0.14em;
   text-transform:uppercase;font-weight:600}
-.yoy-value{font-family:'Fraunces',Georgia,serif;font-size:38px;
+.yoy-value{font-family:'Inter',sans-serif;font-size:38px;
   font-weight:500;color:var(--ink);line-height:1.1}
 .yoy-value.neg{color:var(--accent)}
 .yoy-na{font-size:18px;color:var(--muted);font-style:italic}
-.yoy-note{font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace}
+.yoy-note{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace}
 .yoy-arrow .arrow{font-size:42px;line-height:1}
 .yoy-arrow .arrow.worse{color:var(--accent-today)}
 .yoy-arrow .arrow.better{color:var(--ok)}
 .yoy-arrow .arrow.equal{color:var(--muted)}
-.yoy-delta{font-size:13px;font-family:'IBM Plex Mono',monospace;
+.yoy-delta{font-size:13px;font-family:'JetBrains Mono',monospace;
   color:var(--ink);margin-top:4px;font-weight:600}
 .yoy-prose{margin-top:18px;font-size:13px;color:var(--ink-2);
   line-height:1.6;border-top:1px solid var(--border);padding-top:14px;text-align:center}
@@ -4031,10 +4295,10 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .itm-cell.itm-neg{border-left-color:var(--accent)}
 .itm-tiny{font-size:10px;color:var(--muted);letter-spacing:0.1em;
   text-transform:uppercase;line-height:1.4}
-.itm-ref-val{font-family:'Fraunces',Georgia,serif;font-size:30px;
+.itm-ref-val{font-family:'Inter',sans-serif;font-size:30px;
   color:var(--ink);font-weight:500;margin:6px 0}
 .itm-ref-val .unit{font-size:12px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+  font-family:'JetBrains Mono',monospace;margin-left:4px}
 .itm-label{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
   margin-bottom:10px;font-size:11px;color:var(--ink);
   letter-spacing:0.1em;text-transform:uppercase;font-weight:600}
@@ -4042,10 +4306,10 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .itm-dot.pos{background:var(--ok)}
 .itm-dot.neg{background:var(--accent)}
 .itm-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:8px}
-.itm-num{font-family:'Fraunces',Georgia,serif;font-size:28px;
+.itm-num{font-family:'Inter',sans-serif;font-size:28px;
   color:var(--ink);font-weight:500;line-height:1}
 .itm-num .unit{font-size:12px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;margin-left:2px}
+  font-family:'JetBrains Mono',monospace;margin-left:2px}
 .itm-prose{margin-top:18px;font-size:13px;color:var(--ink-2);
   line-height:1.6;border-top:1px solid var(--border);padding-top:14px}
 @media (max-width:720px){.itm-grid{grid-template-columns:1fr;gap:12px}}
@@ -4054,7 +4318,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .razao-period{font-size:12px;color:var(--ink-2);margin:8px 0 16px;
   padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
   border-radius:2px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .razao-period strong{color:var(--ink);letter-spacing:0.08em;
   text-transform:uppercase;font-size:10px;font-weight:600}
 .razao-period-sep{color:var(--muted)}
@@ -4075,7 +4339,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .razao-stats th.num{text-align:right}
 .razao-stats td{padding:10px 8px;border-bottom:1px solid var(--border);
   color:var(--ink-2)}
-.razao-stats td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.razao-stats td.num{text-align:right;font-family:'JetBrains Mono',monospace}
 .razao-stats tfoot td{border-bottom:none;border-top:2px solid var(--border2);
   padding-top:12px;font-weight:600;color:var(--ink)}
 .razao-row.razao-rel{background:linear-gradient(to right, rgba(168,68,47,0.04), transparent)}
@@ -4094,10 +4358,10 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .heatloss-stats{font-size:12px;color:var(--ink-2);margin:10px 0 16px;
   padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
   border-radius:2px;display:flex;gap:14px;flex-wrap:wrap;align-items:center;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .heatloss-stats strong{color:var(--ink);letter-spacing:0.08em;
   text-transform:uppercase;font-size:10px;font-weight:600;
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
 .heatloss-stats .hl-num{color:var(--accent);font-weight:600;margin-left:4px}
 
 /* ===== ONDA 2B.2: Modulation alpha card ===== */
@@ -4114,16 +4378,16 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .alpha-side{text-align:center}
 .alpha-label{font-size:10px;color:var(--muted);letter-spacing:0.14em;
   text-transform:uppercase;font-weight:600;margin-bottom:6px}
-.alpha-val{font-family:'Fraunces',Georgia,serif;font-size:34px;
+.alpha-val{font-family:'Inter',sans-serif;font-size:34px;
   font-weight:500;color:var(--ink);line-height:1.1}
 .alpha-val.neg{color:var(--accent)}
-.alpha-vs{font-size:14px;color:var(--muted);font-family:'IBM Plex Mono',monospace;
+.alpha-vs{font-size:14px;color:var(--muted);font-family:'JetBrains Mono',monospace;
   letter-spacing:0.1em}
 .alpha-tiny{font-size:11px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;margin-top:4px}
+  font-family:'JetBrains Mono',monospace;margin-top:4px}
 .alpha-gap{text-align:center;padding-left:20px;border-left:1px solid var(--border)}
-.alpha-gap-val{font-family:'Fraunces',Georgia,serif;font-size:28px;
-  font-weight:500;line-height:1.1}
+.alpha-gap-val{font-family:'Inter',sans-serif;font-size:28px;
+  font-weight:600;letter-spacing:-0.02em;line-height:1.1}
 .alpha-gap-val.neg{color:var(--accent-today)}
 .alpha-gap-val.pos{color:var(--ok)}
 
@@ -4139,7 +4403,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .alpha-decomp-fill{height:100%;transition:width 0.3s}
 .alpha-decomp-fill.neg{background:linear-gradient(to right,#d57255,#a8442f)}
 .alpha-decomp-fill.pos{background:linear-gradient(to right,#5db978,#2d5a3d)}
-.alpha-decomp-val{font-family:'IBM Plex Mono',monospace;font-size:14px;
+.alpha-decomp-val{font-family:'JetBrains Mono',monospace;font-size:14px;
   text-align:right;font-weight:600}
 .alpha-decomp-val.neg{color:var(--accent)}
 .alpha-decomp-val.pos{color:var(--ok)}
@@ -4158,14 +4422,14 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .anom-clean-title{font-size:14px;color:#2d5a3d;font-weight:600;
   margin-bottom:4px}
 .anom-clean-desc{font-size:12px;color:var(--ink-2);
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 
 .anom-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;
   margin:24px 0 16px}
 .anom-stat{background:var(--panel);border:1px solid var(--border2);
   border-radius:4px;padding:16px;text-align:center}
-.anom-stat-val{font-family:'Fraunces',Georgia,serif;font-size:30px;
-  font-weight:500;color:var(--ink);line-height:1.1}
+.anom-stat-val{font-family:'Inter',sans-serif;font-size:30px;
+  font-weight:600;letter-spacing:-0.02em;color:var(--ink);line-height:1.1}
 .anom-stat-val.crit{color:var(--accent-today)}
 .anom-stat-val.warn{color:var(--warn)}
 .anom-stat-lbl{font-size:10px;color:var(--muted);letter-spacing:0.1em;
@@ -4181,7 +4445,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .anom-table th.num{text-align:right}
 .anom-table td{padding:10px 14px;border-bottom:1px solid var(--border);
   color:var(--ink-2)}
-.anom-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.anom-table td.num{text-align:right;font-family:'JetBrains Mono',monospace}
 .anom-table tr:last-child td{border-bottom:none}
 .anom-row.anom-critical{background:linear-gradient(to right,
   rgba(217,46,15,0.06),transparent)}
@@ -4215,33 +4479,33 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .proba-bar-marker.p90{background:var(--ok)}
 .proba-bar-labels{display:flex;justify-content:space-between;
   margin-top:8px;font-size:11px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .proba-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
   margin:24px 0 16px}
 .proba-cell{background:var(--bg-alt);padding:18px;border-radius:3px;
-  border-left:4px solid var(--rule);text-align:center}
-.proba-cell.pess{border-left-color:var(--accent-today)}
-.proba-cell.central{border-left-color:var(--ink);background:var(--panel);
-  border:2px solid var(--ink);padding:17px}
-.proba-cell.opt{border-left-color:var(--ok)}
+  border-top:4px solid var(--rule);text-align:center}
+.proba-cell.pess{border-top-color:var(--accent-today)}
+.proba-cell.central{border-top-color:var(--ink);background:var(--panel);
+  border:2px solid var(--ink);border-top:4px solid var(--ink);padding:17px}
+.proba-cell.opt{border-top-color:var(--ok)}
 .proba-pct{font-size:10px;color:var(--muted);letter-spacing:0.16em;
   text-transform:uppercase;font-weight:700;
-  font-family:'IBM Plex Mono',monospace;margin-bottom:6px}
+  font-family:'JetBrains Mono',monospace;margin-bottom:6px}
 .proba-cell.pess .proba-pct{color:var(--accent-today)}
 .proba-cell.opt .proba-pct{color:var(--ok)}
-.proba-val{font-family:'Fraunces',Georgia,serif;font-size:28px;
-  font-weight:500;color:var(--ink);line-height:1}
+.proba-val{font-family:'Inter',sans-serif;font-size:28px;
+  font-weight:600;letter-spacing:-0.02em;color:var(--ink);line-height:1}
 .proba-val .unit{font-size:11px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;margin-left:4px}
+  font-family:'JetBrains Mono',monospace;margin-left:4px}
 .proba-tiny{font-size:10px;color:var(--muted);letter-spacing:0.06em;
   margin-top:8px;line-height:1.3}
 .proba-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
   font-size:11px;color:var(--ink-2);padding:10px 14px;
   background:var(--bg-alt);border-radius:2px;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .proba-meta strong{color:var(--ink);letter-spacing:0.06em;
   text-transform:uppercase;font-size:9px;font-weight:600;
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
 .proba-prose{margin-top:14px;font-size:13px;color:var(--ink-2);
   line-height:1.6;padding-top:12px;border-top:1px solid var(--border)}
 @media (max-width:720px){.proba-grid{grid-template-columns:1fr;gap:10px}}
@@ -4261,14 +4525,14 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .cen-label{font-size:13px;color:var(--ink);font-weight:600;
   letter-spacing:0.04em;margin-bottom:2px}
 .cen-tiny{font-size:10px;color:var(--muted);letter-spacing:0.04em;
-  line-height:1.4;font-family:'IBM Plex Mono',monospace}
-.cen-mwh{font-family:'Fraunces',Georgia,serif;font-size:30px;
-  font-weight:500;color:var(--ink);line-height:1;margin-top:4px}
-.cen-rs{font-family:'Fraunces',Georgia,serif;font-size:24px;
+  line-height:1.4;font-family:'JetBrains Mono',monospace}
+.cen-mwh{font-family:'Inter',sans-serif;font-size:30px;
+  font-weight:600;letter-spacing:-0.02em;color:var(--ink);line-height:1;margin-top:4px}
+.cen-rs{font-family:'Inter',sans-serif;font-size:24px;
   color:var(--accent);font-weight:500;line-height:1}
 .cen-rs .unit, .cen-mwh .unit{font-size:11px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;margin-left:4px}
-.cen-delta{font-size:11px;font-family:'IBM Plex Mono',monospace;
+  font-family:'JetBrains Mono',monospace;margin-left:4px}
+.cen-delta{font-size:11px;font-family:'JetBrains Mono',monospace;
   padding:8px 10px;background:var(--bg-alt);border-radius:2px;
   margin-top:auto;color:var(--ink-2);font-weight:500}
 .cen-delta.pos{color:var(--ok);background:#dff5e8}
@@ -4277,15 +4541,15 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .cen-meta{display:flex;gap:14px;flex-wrap:wrap;align-items:center;
   font-size:11px;color:var(--ink-2);padding:10px 14px;
   background:var(--bg-alt);border-radius:2px;margin:12px 0;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .cen-meta strong{color:var(--ink);letter-spacing:0.06em;
   text-transform:uppercase;font-size:9px;font-weight:600;
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
 .cen-prose{font-size:13px;color:var(--ink-2);line-height:1.6;
   padding:14px;background:var(--bg-alt);border-left:3px solid var(--accent);
   border-radius:2px;margin:12px 0}
 .cen-prose strong{color:var(--ink)}
-.cen-spread{font-family:'IBM Plex Mono',monospace;color:var(--accent);
+.cen-spread{font-family:'JetBrains Mono',monospace;color:var(--accent);
   font-weight:600;margin:0 6px}
 @media (max-width:840px){.cen-grid{grid-template-columns:1fr;gap:12px}}
 
@@ -4295,7 +4559,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   text-transform:uppercase;flex-wrap:wrap}
 .mm-btn{background:var(--panel);border:1px solid var(--border2);
   color:var(--ink-2);padding:7px 14px;border-radius:3px;cursor:pointer;
-  font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+  font-family:'Inter',sans-serif;font-size:12px;
   letter-spacing:0.04em;font-weight:500;transition:all 0.15s}
 .mm-btn:hover{background:var(--bg-alt);color:var(--ink)}
 .mm-btn.active{background:var(--ink);color:var(--bg);
@@ -4305,20 +4569,20 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .mm-period{font-size:12px;color:var(--ink-2);margin-bottom:18px;
   padding:10px 14px;background:var(--bg-alt);border-left:3px solid var(--accent);
   border-radius:2px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .mm-period strong{color:var(--ink);letter-spacing:0.08em;
   text-transform:uppercase;font-size:10px;font-weight:600;
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
 .mm-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;
   margin-bottom:24px}
 .mm-cell{background:var(--bg-alt);padding:14px;border-radius:3px;
-  border-left:3px solid var(--rule);text-align:left}
+  border-top:3px solid var(--rule);text-align:left}
 .mm-tiny{font-size:9px;color:var(--muted);letter-spacing:0.1em;
   text-transform:uppercase;font-weight:600;line-height:1.3}
-.mm-val{font-family:'Fraunces',Georgia,serif;font-size:22px;
-  font-weight:500;color:var(--ink);line-height:1;margin:6px 0 2px}
+.mm-val{font-family:'Inter',sans-serif;font-size:22px;
+  font-weight:600;letter-spacing:-0.015em;color:var(--ink);line-height:1;margin:6px 0 2px}
 .mm-unit{font-size:10px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .mm-unit .mm-extra{margin-left:4px}
 .mm-table{width:100%;border-collapse:collapse;font-size:13px;
   margin-top:6px}
@@ -4329,7 +4593,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .mm-table th.num{text-align:right}
 .mm-table td{padding:10px 12px;border-bottom:1px solid var(--border);
   color:var(--ink-2)}
-.mm-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.mm-table td.num{text-align:right;font-family:'JetBrains Mono',monospace}
 .mm-table td.num.neg{color:var(--accent)}
 .mm-table td.num.pos{color:var(--ok)}
 .mm-table tr:last-child td{border-bottom:none}
@@ -4342,19 +4606,181 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   background:var(--bg-alt);border:1px dashed var(--border2);
   border-radius:4px;text-align:center}
 .setor-soon{font-size:12px;color:var(--muted);line-height:1.6;margin:0;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .setor-soon strong{color:var(--ink);letter-spacing:0.05em;
-  font-family:'IBM Plex Sans',sans-serif}
+  font-family:'Inter',sans-serif}
+
+/* ===== MONTHLY DRILL-DOWN ===== */
+.md-selector-wrap{display:flex;align-items:center;gap:16px;
+  padding:20px 24px;background:var(--panel);border:1px solid var(--border2);
+  border-radius:6px;margin:24px 0 40px;flex-wrap:wrap}
+.md-selector-label{font-family:'JetBrains Mono',monospace;font-size:11px;
+  color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;
+  font-weight:500;flex-shrink:0}
+.md-selector{font-family:'Inter',sans-serif;font-size:15px;
+  font-weight:500;padding:10px 14px;border:1px solid var(--border2);
+  background:var(--bg);color:var(--ink);border-radius:4px;
+  cursor:pointer;min-width:280px;flex:1;max-width:400px}
+.md-selector:hover{border-color:var(--accent)}
+.md-selector:focus{outline:2px solid var(--accent);outline-offset:2px}
+.md-selector-tip{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);margin-left:auto}
+
+.md-headline{display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;background:var(--bg-alt);border-radius:4px;
+  margin:16px 0 28px;gap:16px;flex-wrap:wrap}
+.md-headline-left{display:flex;align-items:center;gap:14px}
+.md-month-name{font-family:'Inter',sans-serif;font-size:28px;
+  font-weight:600;color:var(--ink);letter-spacing:-0.02em;
+  font-variant-numeric:tabular-nums;text-transform:capitalize}
+.md-badge{font-family:'JetBrains Mono',monospace;font-size:10px;
+  padding:4px 10px;border-radius:3px;letter-spacing:0.08em;font-weight:600}
+.md-badge.md-parcial{background:#fff3e0;color:#a8442f}
+.md-badge.md-complete{background:#e8f5e9;color:#2d5a3d}
+.md-headline-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.md-compare-label{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);text-transform:uppercase;letter-spacing:0.06em}
+.md-compare-pill{font-family:'JetBrains Mono',monospace;font-size:11px;
+  padding:4px 10px;border-radius:3px;font-weight:500;
+  background:var(--panel);border:1px solid var(--border2);
+  font-variant-numeric:tabular-nums}
+.md-compare-pill.pos{color:var(--ok);border-color:var(--ok)}
+.md-compare-pill.neg{color:var(--accent);border-color:var(--accent)}
+.md-no-prev{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace}
+
+.md-kpi-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;
+  margin:0 0 40px}
+.md-kpi-card{background:var(--panel);border:1px solid var(--border2);
+  border-top:3px solid var(--rule);border-radius:4px;padding:16px 18px;
+  display:flex;flex-direction:column;gap:8px}
+.md-kpi-card.md-kpi-accent{border-top-color:var(--accent)}
+.md-kpi-card.md-kpi-ok{border-top-color:var(--ok)}
+.md-kpi-card.md-kpi-neutral{border-top-color:var(--neutral)}
+.md-kpi-label{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;
+  font-weight:500}
+.md-kpi-val{font-family:'Inter',sans-serif;font-size:26px;font-weight:600;
+  color:var(--ink);line-height:1;letter-spacing:-0.02em;
+  font-variant-numeric:tabular-nums}
+.md-kpi-card.md-kpi-accent .md-kpi-val{color:var(--accent)}
+.md-kpi-card.md-kpi-ok .md-kpi-val{color:var(--ok)}
+.md-kpi-unit{font-family:'JetBrains Mono',monospace;font-size:11px;
+  color:var(--muted);font-weight:400;margin-left:4px}
+.md-kpi-delta{font-family:'JetBrains Mono',monospace;font-size:11px;
+  padding:5px 8px;border-radius:2px;background:var(--bg-alt);
+  font-variant-numeric:tabular-nums;font-weight:500;display:flex;
+  align-items:center;gap:4px;align-self:flex-start}
+.md-kpi-delta.pos{color:var(--ok);background:#e8f5e9}
+.md-kpi-delta.neg{color:var(--accent);background:#fce4e0}
+.md-kpi-delta.neutral{color:var(--muted)}
+.md-kpi-delta.md-empty{color:var(--muted);background:transparent}
+.md-kpi-delta-lbl{font-size:9px;color:var(--muted);font-weight:400;
+  text-transform:uppercase;letter-spacing:0.06em}
+
+.md-razao-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;
+  margin:0 0 40px}
+.md-razao-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:14px;display:flex;flex-direction:column;gap:6px}
+.md-razao-card.md-razao-accent{border-top:3px solid var(--accent)}
+.md-razao-card.md-razao-warn{border-top:3px solid var(--warn)}
+.md-razao-card.md-razao-neutral{border-top:3px solid var(--neutral)}
+.md-razao-card.md-razao-muted{border-top:3px solid var(--rule)}
+.md-razao-code{font-family:'JetBrains Mono',monospace;font-size:13px;
+  font-weight:600;color:var(--ink);letter-spacing:0.05em}
+.md-razao-label{font-size:10px;color:var(--muted);line-height:1.3;
+  min-height:24px}
+.md-razao-mwh{font-family:'Inter',sans-serif;font-size:19px;font-weight:600;
+  color:var(--ink);line-height:1;letter-spacing:-0.015em;
+  font-variant-numeric:tabular-nums}
+.md-razao-unit{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);font-weight:400;margin-left:3px}
+.md-razao-pct{font-family:'JetBrains Mono',monospace;font-size:12px;
+  color:var(--ink-2);font-variant-numeric:tabular-nums}
+.md-razao-bar{height:4px;background:var(--bg-alt);border-radius:2px;
+  overflow:hidden;margin-top:4px}
+.md-razao-fill{height:100%;background:var(--accent);transition:width 0.3s}
+.md-razao-warn .md-razao-fill{background:var(--warn)}
+.md-razao-neutral .md-razao-fill{background:var(--neutral)}
+.md-razao-muted .md-razao-fill{background:var(--rule)}
+
+.md-daily-wrap{overflow-x:auto;margin:0 0 40px;
+  border:1px solid var(--border2);border-radius:4px}
+.md-daily-table{width:100%;border-collapse:collapse;font-size:13px}
+.md-daily-table th{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.08em;text-transform:uppercase;
+  font-weight:600;text-align:left;padding:12px;
+  background:var(--bg-alt);border-bottom:1px solid var(--border2);
+  user-select:none}
+.md-daily-table th.num{text-align:right}
+.md-daily-table th[data-sort]:hover{background:var(--border);color:var(--ink)}
+.md-daily-table th[data-dir="desc"]::after{content:" ↓";color:var(--accent)}
+.md-daily-table th[data-dir="asc"]::after{content:" ↑";color:var(--accent)}
+.md-daily-table td{padding:10px 12px;border-bottom:1px solid var(--border);
+  color:var(--ink-2)}
+.md-daily-table td.num{text-align:right;font-family:'JetBrains Mono',monospace;
+  font-variant-numeric:tabular-nums}
+.md-daily-table td.has-curt{color:var(--accent);font-weight:500}
+.md-daily-table td.no-curt{color:var(--muted)}
+.md-daily-table td.has-loss{color:var(--accent);font-weight:500}
+.md-daily-table td.no-loss{color:var(--muted)}
+.md-daily-table tr:hover{background:var(--bg-alt)}
+.md-daily-table tr:last-child td{border-bottom:none}
+
+.md-top-list{display:flex;flex-direction:column;gap:8px;margin:0 0 40px}
+.md-top-row{display:grid;grid-template-columns:40px 80px 1fr 200px;gap:12px;
+  align-items:center;padding:10px 14px;background:var(--panel);
+  border:1px solid var(--border2);border-radius:4px}
+.md-top-rank{font-family:'JetBrains Mono',monospace;font-size:12px;
+  color:var(--muted);font-weight:500;font-variant-numeric:tabular-nums}
+.md-top-day{font-family:'Inter',sans-serif;font-weight:600;color:var(--ink)}
+.md-top-bar-wrap{background:var(--bg-alt);height:10px;border-radius:5px;
+  overflow:hidden}
+.md-top-bar{height:100%;background:linear-gradient(to right,var(--accent),
+  var(--accent-2));transition:width 0.4s}
+.md-top-vals{display:flex;justify-content:flex-end;gap:14px;
+  font-family:'JetBrains Mono',monospace;font-size:12px;
+  font-variant-numeric:tabular-nums}
+.md-top-curt{color:var(--ink-2)}
+.md-top-loss{color:var(--accent);font-weight:500}
+
+.md-insights{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;
+  margin:0 0 40px}
+.md-insight-card{background:var(--panel);border:1px solid var(--border2);
+  border-radius:4px;padding:16px;display:flex;gap:12px;align-items:flex-start}
+.md-insight-card.md-insight-bad{border-top:3px solid var(--accent)}
+.md-insight-card.md-insight-good{border-top:3px solid var(--ok)}
+.md-insight-card.md-insight-neutral{border-top:3px solid var(--neutral)}
+.md-insight-card.md-insight-compare{border-top:3px solid var(--ink)}
+.md-insight-icon{font-size:22px;line-height:1;flex-shrink:0}
+.md-insight-body{flex:1;min-width:0}
+.md-insight-label{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;
+  font-weight:500;margin-bottom:6px}
+.md-insight-val{font-family:'Inter',sans-serif;font-size:22px;font-weight:600;
+  color:var(--ink);line-height:1;letter-spacing:-0.02em;
+  font-variant-numeric:tabular-nums}
+.md-insight-val.pos{color:var(--ok)}
+.md-insight-val.neg{color:var(--accent)}
+.md-insight-sub{font-size:11px;color:var(--muted);margin-top:6px;
+  line-height:1.4;font-family:'JetBrains Mono',monospace}
+
+@media (max-width:840px){
+  .md-kpi-grid{grid-template-columns:repeat(2,1fr)}
+  .md-razao-grid{grid-template-columns:repeat(2,1fr)}
+  .md-insights{grid-template-columns:repeat(2,1fr)}
+  .md-top-row{grid-template-columns:30px 70px 1fr;gap:8px}
+  .md-top-vals{grid-column:1/-1;justify-content:flex-start;margin-top:4px}
+}
 
 /* ===== ONDA 4B.1: Sistema Brasil ===== */
 .sb-period,.res-period{font-size:12px;color:var(--ink-2);
   margin:10px 0 18px;padding:10px 14px;background:var(--bg-alt);
   border-left:3px solid var(--accent);border-radius:2px;
   display:flex;gap:14px;flex-wrap:wrap;align-items:center;
-  font-family:'IBM Plex Mono',monospace}
+  font-family:'JetBrains Mono',monospace}
 .sb-period strong,.res-period strong{color:var(--ink);
   letter-spacing:0.08em;text-transform:uppercase;font-size:10px;
-  font-weight:600;font-family:'IBM Plex Sans',sans-serif}
+  font-weight:600;font-family:'Inter',sans-serif}
 .sb-period .neg,.res-period .neg{color:var(--accent-today)}
 .sb-period .pos,.res-period .pos{color:var(--ok)}
 .res-num{color:var(--accent);font-weight:600}
@@ -4367,8 +4793,8 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .sb-renew,.sb-fossil{text-align:center}
 .sb-tiny{font-size:10px;color:var(--muted);letter-spacing:0.1em;
   text-transform:uppercase;font-weight:600;margin-bottom:6px}
-.sb-pct{font-family:'Fraunces',Georgia,serif;font-size:32px;
-  font-weight:500;line-height:1}
+.sb-pct{font-family:'Inter',sans-serif;font-size:32px;
+  font-weight:600;letter-spacing:-0.02em;line-height:1}
 .sb-pct.pos{color:var(--ok)}
 .sb-pct.neg{color:var(--accent-today)}
 .sb-mix-bar{display:flex;height:24px;border-radius:3px;overflow:hidden;
@@ -4381,9 +4807,9 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .sb-mix-legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 16px;
   font-size:12px;color:var(--ink-2)}
 .sb-leg-item{display:flex;gap:6px;align-items:center;
-  font-family:'IBM Plex Mono',monospace;font-size:11px}
+  font-family:'JetBrains Mono',monospace;font-size:11px}
 .sb-leg-item strong{color:var(--ink);font-weight:600;
-  font-family:'IBM Plex Sans',sans-serif;font-size:13px}
+  font-family:'Inter',sans-serif;font-size:13px}
 .sb-leg-num{color:var(--muted)}
 .sb-dot{width:10px;height:10px;border-radius:2px}
 .sb-dot.hidro{background:#2d5a7d}
@@ -4397,7 +4823,7 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 .sb-table th.num{text-align:right}
 .sb-table td{padding:8px;border-bottom:1px solid var(--border);
   color:var(--ink-2)}
-.sb-table td.num{text-align:right;font-family:'IBM Plex Mono',monospace}
+.sb-table td.num{text-align:right;font-family:'JetBrains Mono',monospace}
 .sb-table tr:last-child td{border-bottom:none}
 @media (max-width:720px){.sb-mix-headline{grid-template-columns:1fr}}
 
@@ -4421,15 +4847,15 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
   background:linear-gradient(to top,#a8442f,#d57255)}
 .res-cell.res-medium .res-meter-fill{
   background:linear-gradient(to top,#d4a017,#e8b73e)}
-.res-pct{font-family:'Fraunces',Georgia,serif;font-size:26px;
-  font-weight:500;color:var(--ink);line-height:1;margin-top:2px}
-.res-yoy{font-size:11px;font-family:'IBM Plex Mono',monospace;
+.res-pct{font-family:'Inter',sans-serif;font-size:26px;
+  font-weight:600;letter-spacing:-0.02em;color:var(--ink);line-height:1;margin-top:2px}
+.res-yoy{font-size:11px;font-family:'JetBrains Mono',monospace;
   color:var(--muted);padding:2px 8px;border-radius:10px;
   background:var(--bg-alt)}
 .res-yoy.pos{color:var(--ok);background:#dff5e8}
 .res-yoy.neg{color:var(--accent-today);background:#fce4e0}
 .res-tiny{font-size:9px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;line-height:1.3}
+  font-family:'JetBrains Mono',monospace;line-height:1.3}
 .res-prose{font-size:13px;color:var(--ink-2);line-height:1.6;
   padding:14px;background:var(--bg-alt);border-left:3px solid var(--accent);
   border-radius:2px;margin:14px 0}
@@ -4438,15 +4864,19 @@ html[data-mode="present"] .tab-pane:not(.active){display:none !important}
 
 *{box-sizing:border-box}
 html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
-  font-family:'IBM Plex Sans',Georgia,serif;
-  -webkit-font-smoothing:antialiased; line-height:1.5}
+  font-family:'Inter',sans-serif;
+  -webkit-font-smoothing:antialiased; line-height:1.55;
+  font-feature-settings:"ss01","cv11"}
+.num,.kpi,.kpi-val,.bignum-val,td.num,th.num,table.num,
+.proba-val,.cen-mwh,.cen-rs,.mm-val,.sb-pct,.res-pct,
+.alpha-val,.mw-val,.bench-val,.met-val{font-variant-numeric:tabular-nums}
 .wrap{max-width:1100px;margin:0 auto;padding:80px 32px 96px}
 
 /* Language toggle */
 .lang-toggle{position:fixed;top:24px;right:24px;z-index:1000;
   background:var(--panel);border:1px solid var(--border2);
   border-radius:2px;padding:4px;display:flex;gap:0;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;
   letter-spacing:0.1em;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
 .lang-btn{background:transparent;border:none;cursor:pointer;
   padding:6px 12px;color:var(--muted);font-family:inherit;
@@ -4457,14 +4887,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 
 .masthead{display:flex;align-items:center;justify-content:space-between;
   border-bottom:1px solid var(--ink);padding-bottom:16px;margin-bottom:32px;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--ink-2);letter-spacing:0.18em;text-transform:uppercase}
 .masthead .vol{font-weight:600}
 
 .tabs{display:flex;gap:0;border-bottom:1px solid var(--rule);
   margin-bottom:48px;flex-wrap:wrap}
 .tab{background:none;border:none;cursor:pointer;
-  font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:500;
+  font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:500;
   color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;
   padding:14px 24px;margin-right:6px;
   border-bottom:2px solid transparent;
@@ -4473,29 +4903,41 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .tab.active{color:var(--accent);border-bottom-color:var(--accent);
   font-weight:600}
 
-.hero{margin-bottom:60px}
-.hero .kicker{font-family:'IBM Plex Mono',monospace;font-size:11px;
-  color:var(--accent);letter-spacing:0.25em;text-transform:uppercase;
-  margin-bottom:18px}
-.hero h1{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:clamp(40px,7vw,72px);line-height:0.98;
-  letter-spacing:-0.02em;margin:0 0 24px;font-variation-settings:"opsz" 144}
-.hero h1 em{font-style:italic;font-weight:400;color:var(--accent)}
-.hero .lede{font-family:'Fraunces',Georgia,serif;font-weight:400;font-size:20px;
-  line-height:1.45;color:var(--ink-2);max-width:720px;
-  font-variation-settings:"opsz" 36}
-.hero .lede strong{color:var(--ink);font-weight:500}
-.hero .byline{margin-top:32px;font-family:'IBM Plex Mono',monospace;
-  font-size:11px;color:var(--muted);letter-spacing:0.1em;
-  text-transform:uppercase;line-height:1.8}
-.hero .byline span{color:var(--ink)}
+/* HERO COMPACTO (Versão B) */
+.hero{margin:0 0 32px;padding:14px 18px 14px 14px;
+  background:var(--panel);border:0.5px solid var(--border2);
+  border-radius:6px;display:flex;align-items:center;gap:14px;
+  position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;left:0;top:0;bottom:0;
+  width:4px;background:var(--accent)}
+.hero .kicker{font-family:'JetBrains Mono',monospace;font-size:10px;
+  color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;
+  margin:0;font-weight:500;flex-shrink:0}
+.hero h1{font-family:'Inter',sans-serif;font-weight:600;
+  font-size:16px;line-height:1.2;letter-spacing:-0.01em;
+  margin:0;color:var(--ink);display:inline-flex;align-items:baseline;
+  gap:8px;flex:1;min-width:0}
+.hero h1 em{font-style:normal;font-weight:600;color:var(--accent)}
+.hero h1 span:not(:first-child)::before{content:" · ";color:var(--muted);
+  font-weight:400;margin:0 2px}
+.hero .lede{display:none}
+.hero .byline{margin:0;font-family:'JetBrains Mono',monospace;
+  font-size:10px;color:var(--muted);letter-spacing:0.06em;
+  text-transform:none;line-height:1.4;flex-shrink:0;text-align:right}
+.hero .byline span{color:var(--ink-2);font-weight:500}
+.hero .byline br{display:none}
+@media (max-width:720px){
+  .hero{flex-wrap:wrap;padding:12px 14px}
+  .hero h1{font-size:14px;width:100%}
+  .hero .byline{font-size:9px}
+}
 
 /* Trend sparkline strip — visual hierarchy with bigger numbers */
 .trend-strip{display:grid;grid-template-columns:repeat(3,1fr);
   gap:24px;margin:0 0 48px;padding:28px 32px;
   background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
 .trend-cell{display:flex;flex-direction:column;gap:6px;position:relative}
-.trend-cell .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.trend-cell .lbl{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.18em;text-transform:uppercase;
   display:flex;align-items:center;gap:8px}
 .trend-cell .lbl .arrow{display:inline-block;font-size:14px;line-height:1;
@@ -4503,21 +4945,21 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .trend-cell .lbl .arrow.up{color:var(--accent-today)}
 .trend-cell .lbl .arrow.down{color:var(--ok)}
 .trend-cell .lbl .arrow.flat{color:var(--muted)}
-.trend-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.trend-cell .val{font-family:'Inter',sans-serif;font-weight:500;
   font-size:42px;line-height:1;letter-spacing:-0.015em;
   font-variation-settings:"opsz" 72}
 /* Semantic colour: piorando (up) = red, melhorando (down) = green */
 .trend-cell.t-up .val{color:var(--accent-today)}
 .trend-cell.t-down .val{color:var(--ok)}
 .trend-cell.t-flat .val{color:var(--ink)}
-.trend-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:15px;
+.trend-cell .val .unit{font-family:'Inter',sans-serif;font-size:15px;
   color:var(--muted);font-weight:400;margin-left:5px}
-.trend-cell .delta{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.trend-cell .delta{font-family:'JetBrains Mono',monospace;font-size:11px;
   letter-spacing:0.04em;color:var(--muted)}
 .trend-cell .delta.up{color:var(--accent-today);font-weight:500}
 .trend-cell .delta.down{color:var(--ok);font-weight:500}
 .trend-cell .delta.flat{color:var(--muted)}
-.trend-cell .baseline{font-family:'IBM Plex Mono',monospace;font-size:9px;
+.trend-cell .baseline{font-family:'JetBrains Mono',monospace;font-size:9px;
   color:var(--muted);opacity:0.7;letter-spacing:0.05em;margin-top:4px;
   border-top:1px dashed var(--rule);padding-top:4px}
 
@@ -4527,11 +4969,11 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .bench-selector-head{display:flex;align-items:center;justify-content:space-between;
   margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--rule);
   flex-wrap:wrap;gap:10px}
-.bench-selector label{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.bench-selector label{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--ink);letter-spacing:0.16em;text-transform:uppercase;font-weight:500}
 .bench-selector-meta{display:flex;gap:8px;flex-wrap:wrap}
 .bench-btn-mini{padding:6px 12px;border:1px solid var(--rule);background:var(--panel);
-  font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.1em;
+  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.1em;
   color:var(--ink);cursor:pointer;border-radius:2px;text-transform:uppercase;
   transition:all 0.15s}
 .bench-btn-mini:hover{background:var(--bg);border-color:var(--accent)}
@@ -4543,9 +4985,9 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .bench-checkbox-row input[type=checkbox]{margin:0;cursor:pointer;
   width:14px;height:14px;accent-color:var(--accent)}
 .bench-cb-label{display:flex;flex-direction:column;gap:2px;flex:1}
-.bench-cb-label > span:first-child{font-family:'IBM Plex Sans',sans-serif;
+.bench-cb-label > span:first-child{font-family:'Inter',sans-serif;
   font-size:12px;color:var(--ink);font-weight:500}
-.bench-cb-meta{font-family:'IBM Plex Mono',monospace;font-size:9px;
+.bench-cb-meta{font-family:'JetBrains Mono',monospace;font-size:9px;
   color:var(--muted);letter-spacing:0.04em}
 .bench-cb-swatch{display:inline-block;width:10px;height:10px;border-radius:50%;
   flex-shrink:0}
@@ -4553,40 +4995,40 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border-top:1px dashed var(--rule)}
 .bench-fleet-row{background:rgba(217,46,15,0.03)}
 .bench-fleet-row:hover{background:rgba(217,46,15,0.06)}
-.bench-meta{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.bench-meta{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.04em;font-style:italic;margin:14px 0 0}
 .bench-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;
   margin:0 0 24px}
 @media(max-width:900px){.bench-cards{grid-template-columns:1fr}}
 .bench-card{background:var(--panel);border:1px solid var(--rule);
   border-radius:2px;padding:22px 24px;display:flex;flex-direction:column;gap:14px}
-.bench-card-mauriti{border-left:3px solid var(--accent)}
-.bench-card-peer{border-left:3px solid var(--neutral)}
-.bench-card-diff{border-left:3px solid var(--ink);background:var(--bg-alt)}
-.bench-card-label{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.bench-card-mauriti{border-top:3px solid var(--accent)}
+.bench-card-peer{border-top:3px solid var(--neutral)}
+.bench-card-diff{border-top:3px solid var(--ink);background:var(--bg-alt)}
+.bench-card-label{font-family:'JetBrains Mono',monospace;font-size:10px;
   font-weight:600;letter-spacing:0.22em;text-transform:uppercase;
   color:var(--ink)}
-.bench-card-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.bench-card-sub{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.04em;margin-top:-8px}
 .bench-rows{display:flex;flex-direction:column;gap:10px;margin-top:6px}
 .bench-row{display:flex;justify-content:space-between;align-items:baseline;
   border-bottom:1px dotted var(--rule);padding-bottom:8px}
 .bench-row:last-child{border-bottom:none;padding-bottom:0}
-.bench-row .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.bench-row .key{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.1em;text-transform:uppercase}
-.bench-row .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.bench-row .val{font-family:'Inter',sans-serif;font-weight:500;
   font-size:22px;line-height:1;letter-spacing:-0.01em;color:var(--ink);
   font-variation-settings:"opsz" 72}
-.bench-row .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:11px;
+.bench-row .val .unit{font-family:'Inter',sans-serif;font-size:11px;
   color:var(--muted);font-weight:400;margin-left:3px}
 .bench-row.diff-worse .val{color:var(--accent-today)}
 .bench-row.diff-better .val{color:var(--ok)}
 .bench-row.diff-neutral .val{color:var(--muted)}
 
 .bench-table-wrap{margin:24px 0 0}
-.bench-table-wrap h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.bench-table-wrap h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:17px;margin:0 0 8px;color:var(--ink)}
-.bench-table-desc{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+.bench-table-desc{font-family:'Inter',sans-serif;font-size:13px;
   line-height:1.55;color:var(--muted);margin:0 0 14px;max-width:780px}
 .bench-table tbody tr{cursor:pointer;transition:background 0.15s}
 .bench-table tbody tr:hover{background:var(--bg-alt)}
@@ -4602,7 +5044,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .bench-table tbody tr td:first-child{text-align:center;width:24px;
   padding-right:0}
 .trend-banner{margin:-24px 0 32px;padding:14px 20px;border-radius:2px;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;
   letter-spacing:0.12em;text-transform:uppercase;font-weight:500;
   display:flex;align-items:center;gap:10px}
 .trend-banner.up{background:#fbe8e4;color:#7a2818;
@@ -4616,25 +5058,25 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border:1px solid var(--rule);border-radius:2px;position:relative}
 .tracker .liveflag{position:absolute;top:-12px;left:32px;
   background:var(--accent-today);color:#fff;
-  font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;
+  font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;
   letter-spacing:0.2em;padding:5px 10px;text-transform:uppercase}
-.tracker h2{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.tracker h2{font-family:'Inter',sans-serif;font-weight:500;
   font-size:28px;line-height:1.1;letter-spacing:-0.01em;margin:0 0 6px}
-.tracker .when{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.tracker .when{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.12em;text-transform:uppercase;
   margin-bottom:24px}
 .tracker-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
   gap:24px;margin:20px 0 28px;padding:20px 0;
   border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
-.t-stat .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.t-stat .lbl{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);text-transform:uppercase;letter-spacing:0.15em;
   margin-bottom:8px}
-.t-stat .val{font-family:'Fraunces',Georgia,serif;font-weight:400;
+.t-stat .val{font-family:'Inter',sans-serif;font-weight:400;
   font-size:30px;line-height:1;letter-spacing:-0.01em}
-.t-stat .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+.t-stat .val .unit{font-family:'Inter',sans-serif;font-size:13px;
   color:var(--muted);font-weight:400;margin-left:3px}
 .t-stat.alt .val{color:var(--accent)}
-.t-stat .delta{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.t-stat .delta{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);margin-top:6px;letter-spacing:0.04em}
 .t-stat .delta.up{color:var(--accent-today);font-weight:500}
 .t-stat .delta.down{color:var(--ok);font-weight:500}
@@ -4642,12 +5084,12 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .bignum{display:grid;grid-template-columns:1fr 1.4fr;gap:64px;
   align-items:end;margin:64px 0 48px;padding-top:40px;
   border-top:3px double var(--rule)}
-.bignum .figure{font-family:'Fraunces',Georgia,serif;font-weight:300;
+.bignum .figure{font-family:'Inter',sans-serif;font-weight:300;
   font-size:clamp(80px,16vw,160px);line-height:0.9;letter-spacing:-0.04em;
   color:var(--accent);font-variation-settings:"opsz" 144}
 .bignum .figure span{font-size:0.32em;color:var(--ink);font-weight:500;
   margin-left:14px;letter-spacing:0;display:inline-block}
-.bignum .copy h2{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.bignum .copy h2{font-family:'Inter',sans-serif;font-weight:500;
   font-size:28px;line-height:1.15;letter-spacing:-0.01em;margin:0 0 16px}
 .bignum .copy p{font-size:15px;line-height:1.65;color:var(--ink-2);
   margin:0 0 8px;max-width:520px}
@@ -4656,42 +5098,48 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
   gap:36px 40px;margin:48px 0;padding:32px 0;
   border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
-.stat .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.stat .lbl{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);text-transform:uppercase;letter-spacing:0.18em;
   margin-bottom:10px}
-.stat .val{font-family:'Fraunces',Georgia,serif;font-weight:400;
+.stat .val{font-family:'Inter',sans-serif;font-weight:400;
   font-size:34px;line-height:1;letter-spacing:-0.02em;color:var(--ink);
   font-variation-settings:"opsz" 72}
-.stat .val .unit{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+.stat .val .unit{font-family:'Inter',sans-serif;font-size:13px;
   color:var(--muted);font-weight:400;margin-left:4px}
-.stat .delta{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.stat .delta{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);margin-top:8px;letter-spacing:0.05em}
 .stat.alt .val{color:var(--accent)}
 
-.section-head{margin:64px 0 28px;padding-bottom:14px;
-  border-bottom:1px solid var(--ink);
-  display:flex;align-items:baseline;gap:18px}
-.section-head .num{font-family:'IBM Plex Mono',monospace;font-size:11px;
-  color:var(--muted);letter-spacing:0.2em}
-.section-head h3{font-family:'Fraunces',Georgia,serif;font-weight:500;
-  font-size:26px;line-height:1.1;letter-spacing:-0.01em;margin:0;flex:1;
-  font-variation-settings:"opsz" 36}
-.section-head .tag{font-family:'IBM Plex Mono',monospace;font-size:10px;
-  color:var(--muted);text-transform:uppercase;letter-spacing:0.15em}
-.section-desc{font-family:'Fraunces',Georgia,serif;font-size:17px;
-  line-height:1.55;color:var(--ink-2);max-width:680px;margin:0 0 28px;
-  font-variation-settings:"opsz" 28}
+.section-head{margin:80px 0 16px;padding-bottom:10px;
+  border-bottom:none;
+  display:flex;align-items:center;gap:12px;position:relative}
+.section-head::after{content:"";position:absolute;left:0;right:0;bottom:0;
+  height:1px;background:linear-gradient(to right,var(--rule) 0%,
+    var(--rule) 30%,transparent 100%)}
+.section-head .num{font-family:'JetBrains Mono',monospace;font-size:12px;
+  color:var(--muted);letter-spacing:0.04em;font-weight:500;
+  font-variant-numeric:tabular-nums}
+.section-head h3{font-family:'Inter',sans-serif;font-weight:600;
+  font-size:18px;line-height:1.3;letter-spacing:-0.01em;margin:0;flex:1;
+  color:var(--ink);text-transform:lowercase}
+.section-head h3::first-letter{text-transform:none}
+.section-head .tag{font-family:'JetBrains Mono',monospace;font-size:9px;
+  color:var(--accent);background:var(--accent-soft,#f5e8e3);
+  text-transform:uppercase;letter-spacing:0.08em;padding:3px 8px;
+  border-radius:3px;font-weight:500}
+.section-desc{font-family:'Inter',sans-serif;font-size:14px;
+  line-height:1.6;color:var(--ink-2);max-width:720px;margin:0 0 24px}
 .pullquote{margin:40px 0;padding:28px 36px;background:var(--bg-alt);
   border-left:3px solid var(--accent);
-  font-family:'Fraunces',Georgia,serif;font-size:19px;line-height:1.5;
+  font-family:'Inter',sans-serif;font-size:19px;line-height:1.5;
   color:var(--ink);font-variation-settings:"opsz" 36}
 .pullquote strong{color:var(--accent);font-weight:500;font-style:italic}
-.pullquote cite{display:block;margin-top:14px;font-family:'IBM Plex Mono',monospace;
+.pullquote cite{display:block;margin-top:14px;font-family:'JetBrains Mono',monospace;
   font-size:10px;color:var(--muted);font-style:normal;
   letter-spacing:0.15em;text-transform:uppercase}
 .disclaimer{margin:32px 0;padding:20px 24px;background:transparent;
   border:1px dashed var(--rule);border-radius:2px;
-  font-family:'IBM Plex Sans',sans-serif;font-size:13px;line-height:1.6;
+  font-family:'Inter',sans-serif;font-size:13px;line-height:1.6;
   color:var(--muted)}
 .disclaimer strong{color:var(--ink-2);font-weight:500}
 .chart{background:var(--panel);border:1px solid var(--border);
@@ -4703,17 +5151,17 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .csv-actions{display:flex;gap:12px;align-items:center;
   margin:0 0 24px;flex-wrap:wrap}
 .btn-csv{background:var(--ink);color:var(--bg);border:none;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;
+  font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:500;
   letter-spacing:0.18em;text-transform:uppercase;padding:10px 18px;
   border-radius:2px;cursor:pointer;text-decoration:none;
   display:inline-flex;align-items:center;gap:8px;transition:opacity 0.15s}
 .btn-csv:hover{opacity:0.85}
-.events-summary{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.events-summary{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.05em}
 .events-table-wrap{background:var(--panel);border:1px solid var(--border);
   border-radius:2px;overflow:auto;max-height:520px}
 .events-table{width:100%;border-collapse:collapse;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--ink-2)}
 .events-table th{background:var(--bg-alt);position:sticky;top:0;
   text-align:left;padding:10px 14px;border-bottom:1px solid var(--rule);
@@ -4727,22 +5175,22 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .events-table .razao.cnf{color:var(--accent-2)}
 .events-table .num{text-align:right;font-variant-numeric:tabular-nums}
 .empty-msg{padding:48px 32px;text-align:center;color:var(--muted);
-  font-family:'Fraunces',Georgia,serif;font-size:17px;font-style:italic}
+  font-family:'Inter',sans-serif;font-size:17px;font-style:italic}
 
 /* Modulation: recap line above chart + day-by-day table below */
 .mod-recap{margin:0 0 18px;padding:14px 20px;
   background:var(--bg-alt);border-left:3px solid var(--accent-today);
   border-radius:2px;
-  font-family:'IBM Plex Sans',sans-serif;font-size:13px;line-height:1.7;
+  font-family:'Inter',sans-serif;font-size:13px;line-height:1.7;
   color:var(--ink-2)}
 .mod-recap strong{color:var(--ink);font-weight:500}
 .mod-recap .recap-bad{color:var(--accent-today);font-weight:600}
 .mod-table-wrap{margin:32px 0 0;padding:24px 28px;
   background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px}
 .mod-table-head{margin-bottom:18px}
-.mod-table-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.mod-table-head h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:18px;margin:0 0 6px;color:var(--ink)}
-.mod-table-sub{display:block;font-family:'IBM Plex Sans',sans-serif;
+.mod-table-sub{display:block;font-family:'Inter',sans-serif;
   font-size:12px;line-height:1.55;color:var(--muted);max-width:620px}
 .mod-table tr.row-mid td{background:rgba(212,160,23,0.07)}
 .mod-table tr.row-bad td{background:rgba(217,46,15,0.08)}
@@ -4755,7 +5203,7 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 /* ============================== */
 .forecast-empty{padding:48px;text-align:center;background:var(--bg-alt);
   border:1px solid var(--rule);border-radius:2px;color:var(--muted);
-  font-family:'IBM Plex Mono',monospace;font-size:13px}
+  font-family:'JetBrains Mono',monospace;font-size:13px}
 .forecast-wrap{display:flex;flex-direction:column;gap:24px;margin:24px 0 16px}
 
 /* === Section 1: Projection === */
@@ -4764,22 +5212,22 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .forecast-projection-head{display:flex;align-items:center;justify-content:space-between;
   margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--rule);
   flex-wrap:wrap;gap:8px}
-.forecast-projection-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-projection-head h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:17px;margin:0;color:var(--ink)}
-.forecast-proj-sub{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.forecast-proj-sub{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);letter-spacing:0.06em}
 .forecast-proj-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
 @media(max-width:768px){.forecast-proj-grid{grid-template-columns:repeat(2,1fr)}}
 .forecast-proj-cell{display:flex;flex-direction:column;gap:6px;padding:8px 0}
-.forecast-proj-cell .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-proj-cell .key{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.12em;text-transform:uppercase}
-.forecast-proj-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-proj-cell .val{font-family:'Inter',sans-serif;font-weight:500;
   font-size:24px;line-height:1;letter-spacing:-0.01em;color:var(--ink)}
-.forecast-proj-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;
+.forecast-proj-cell .val .unit{font-family:'Inter',sans-serif;
   font-size:11px;color:var(--muted);font-weight:400;margin-left:4px}
 .forecast-proj-cell.forecast-proj-total{padding-left:18px;border-left:3px solid var(--accent)}
 .forecast-proj-cell.forecast-proj-total .val{font-size:28px;color:var(--accent)}
-.forecast-proj-meta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-proj-meta{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);margin-top:2px;letter-spacing:0.04em}
 
 /* === Section 2: Contract setup === */
@@ -4787,10 +5235,10 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border:1px solid var(--rule);border-radius:2px}
 .forecast-contracts-head{display:flex;align-items:center;justify-content:space-between;
   margin-bottom:18px;padding-bottom:14px;border-bottom:1px solid var(--rule)}
-.forecast-contracts-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-contracts-head h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:17px;margin:0;color:var(--ink)}
 .forecast-btn-mini{padding:6px 14px;border:1px solid var(--accent);background:var(--panel);
-  font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:0.1em;
+  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.1em;
   color:var(--accent);cursor:pointer;border-radius:2px;text-transform:uppercase;
   transition:all 0.15s;font-weight:500}
 .forecast-btn-mini:hover{background:var(--accent);color:var(--panel)}
@@ -4800,19 +5248,19 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 .forecast-contract:last-of-type{border-bottom:none}
 .forecast-contract-head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .forecast-contract-tag{display:inline-block;padding:3px 9px;background:var(--ink);
-  color:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:10px;
+  color:var(--panel);font-family:'JetBrains Mono',monospace;font-size:10px;
   font-weight:600;letter-spacing:0.1em;border-radius:2px}
-.forecast-contract-label{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.forecast-contract-label{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--ink);letter-spacing:0.06em;font-weight:500}
 .forecast-btn-remove{margin-left:auto;padding:4px 10px;border:1px solid var(--rule);
-  background:transparent;font-family:'IBM Plex Mono',monospace;font-size:9px;
+  background:transparent;font-family:'JetBrains Mono',monospace;font-size:9px;
   letter-spacing:0.1em;color:var(--muted);cursor:pointer;border-radius:2px;
   text-transform:uppercase}
 .forecast-btn-remove:hover{color:var(--accent-today);border-color:var(--accent-today)}
 .forecast-contract-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px;
   align-items:start}
 @media(max-width:768px){.forecast-contract-grid{grid-template-columns:1fr}}
-.forecast-input-group label{display:block;font-family:'IBM Plex Mono',monospace;
+.forecast-input-group label{display:block;font-family:'JetBrains Mono',monospace;
   font-size:10px;color:var(--muted);letter-spacing:0.1em;
   text-transform:uppercase;margin-bottom:6px}
 .forecast-input-row{display:flex;gap:10px;align-items:center}
@@ -4826,18 +5274,18 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   cursor:pointer;border:2px solid var(--panel)}
 .forecast-input-row input[type="number"]{width:96px;padding:7px 10px;
   border:1px solid var(--rule);background:var(--panel);
-  font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink);
+  font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink);
   border-radius:2px;text-align:right}
 .forecast-input-row input[type="number"]:focus{outline:none;border-color:var(--accent)}
 .forecast-select{width:100%;padding:8px 10px;border:1px solid var(--rule);
-  background:var(--panel);font-family:'IBM Plex Mono',monospace;font-size:12px;
+  background:var(--panel);font-family:'JetBrains Mono',monospace;font-size:12px;
   color:var(--ink);border-radius:2px;cursor:pointer}
 .forecast-select:focus{outline:none;border-color:var(--accent)}
-.forecast-hint{font-family:'IBM Plex Mono',monospace;font-size:9px;
+.forecast-hint{font-family:'JetBrains Mono',monospace;font-size:9px;
   color:var(--muted);letter-spacing:0.04em;margin-top:4px;font-style:italic}
 .forecast-portfolio-summary{margin-top:16px;padding:12px 16px;
   background:var(--bg-alt);border:1px solid var(--rule);border-radius:2px;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink);
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink);
   letter-spacing:0.04em;display:flex;justify-content:space-between;flex-wrap:wrap;
   gap:8px}
 .forecast-portfolio-summary strong{font-weight:600;color:var(--accent)}
@@ -4847,22 +5295,22 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   border:1px solid var(--rule);border-radius:2px}
 .forecast-pld-head{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;
   flex-wrap:wrap}
-.forecast-pld-head h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-pld-head h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:15px;margin:0;color:var(--ink)}
-.forecast-pld-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-pld-sub{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.04em;font-style:italic}
 .forecast-pld-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
   gap:10px;margin-bottom:14px}
 .forecast-pld-cell{padding:10px 12px;background:var(--panel);border:1px solid var(--rule);
   border-radius:2px;text-align:center}
-.forecast-pld-cell .sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-pld-cell .sub{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px}
-.forecast-pld-cell .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-pld-cell .val{font-family:'Inter',sans-serif;font-weight:500;
   font-size:18px;color:var(--ink);line-height:1}
-.forecast-pld-cell .val .unit{font-family:'IBM Plex Sans',sans-serif;
+.forecast-pld-cell .val .unit{font-family:'Inter',sans-serif;
   font-size:9px;color:var(--muted);font-weight:400;margin-left:2px}
 .forecast-pld-meta{padding:10px 0 0;border-top:1px dashed var(--rule);
-  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink);
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink);
   letter-spacing:0.04em}
 .forecast-pld-meta strong{color:var(--accent);font-weight:600}
 .forecast-pld-extra{color:var(--muted);font-size:10px;margin-left:6px;
@@ -4873,33 +5321,33 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 @media(max-width:900px){.forecast-cards-row{grid-template-columns:1fr}}
 .forecast-card{padding:22px 24px;background:var(--panel);border:1px solid var(--rule);
   border-radius:2px;display:flex;flex-direction:column;gap:12px}
-.forecast-card-ccee{border-left:3px solid var(--neutral)}
-.forecast-card-comm{border-left:3px solid var(--accent)}
-.forecast-card-final{border-left:3px solid var(--ink);background:var(--bg-alt);
+.forecast-card-ccee{border-top:3px solid var(--neutral)}
+.forecast-card-comm{border-top:3px solid var(--accent)}
+.forecast-card-final{border-top:3px solid var(--ink);background:var(--bg-alt);
   padding:26px 28px}
-.forecast-card-label{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-card-label{font-family:'JetBrains Mono',monospace;font-size:10px;
   font-weight:600;letter-spacing:0.22em;text-transform:uppercase;color:var(--ink)}
-.forecast-card-sub{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-card-sub{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.04em;margin-top:-6px}
 .forecast-card-detail{display:flex;flex-direction:column;gap:8px;margin-top:4px}
 .forecast-card-row{display:flex;justify-content:space-between;align-items:baseline;
-  font-family:'IBM Plex Mono',monospace;font-size:11px}
+  font-family:'JetBrains Mono',monospace;font-size:11px}
 .forecast-card-row .label{color:var(--muted);letter-spacing:0.04em}
 .forecast-card-row .value{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
 .forecast-card-row.is-neg .value{color:var(--accent-today)}
 .forecast-card-row.is-pos .value{color:var(--ok)}
 .forecast-card-total{display:flex;justify-content:space-between;align-items:baseline;
   padding-top:12px;border-top:1px solid var(--rule);margin-top:auto}
-.forecast-card-total .key{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-card-total .key{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--ink);letter-spacing:0.1em;text-transform:uppercase;font-weight:600}
-.forecast-card-total .val{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-card-total .val{font-family:'Inter',sans-serif;font-weight:500;
   font-size:22px;color:var(--ink);line-height:1}
-.forecast-card-final .forecast-final-figure{font-family:'Fraunces',Georgia,serif;
+.forecast-card-final .forecast-final-figure{font-family:'Inter',sans-serif;
   font-weight:500;font-size:42px;line-height:1;letter-spacing:-0.02em;
   color:var(--ink);font-variation-settings:"opsz" 72;margin:8px 0}
 .forecast-card-final.is-pos .forecast-final-figure{color:var(--ok)}
 .forecast-card-final.is-neg .forecast-final-figure{color:var(--accent-today)}
-.forecast-final-meta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-final-meta{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.04em;line-height:1.5}
 
 /* === Section 5: Alert === */
@@ -4907,33 +5355,33 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
   background:rgba(217,46,15,0.08);border:1px solid var(--accent-today);
   border-radius:2px;align-items:flex-start}
 .forecast-alert-icon{font-size:20px;color:var(--accent-today);line-height:1}
-.forecast-alert-body strong{display:block;font-family:'IBM Plex Mono',monospace;
+.forecast-alert-body strong{display:block;font-family:'JetBrains Mono',monospace;
   font-size:11px;letter-spacing:0.1em;text-transform:uppercase;
   color:var(--accent-today);margin-bottom:6px}
-.forecast-alert-body p{font-family:'IBM Plex Sans',sans-serif;font-size:13px;
+.forecast-alert-body p{font-family:'Inter',sans-serif;font-size:13px;
   color:var(--ink);margin:0;line-height:1.5}
 
 /* === Section 6: Sensitivity strip === */
 .forecast-sensitivity{padding:22px 24px;background:var(--bg-alt);
   border:1px solid var(--rule);border-radius:2px}
-.forecast-sensitivity h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-sensitivity h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:15px;margin:0 0 8px;color:var(--ink)}
-.forecast-sens-desc{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+.forecast-sens-desc{font-family:'Inter',sans-serif;font-size:12px;
   color:var(--muted);line-height:1.55;margin:0 0 16px;max-width:760px}
 .forecast-sens-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
 @media(max-width:768px){.forecast-sens-grid{grid-template-columns:1fr}}
 .forecast-sens-cell{padding:14px 16px;background:var(--panel);
   border:1px solid var(--rule);border-radius:2px;text-align:center}
 .forecast-sens-cell.is-base{border-color:var(--accent);background:rgba(168,68,47,0.04)}
-.forecast-sens-cell .scenario{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-sens-cell .scenario{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px}
 .forecast-sens-cell.is-base .scenario{color:var(--accent);font-weight:600}
-.forecast-sens-cell .pld-future{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.forecast-sens-cell .pld-future{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);margin-bottom:6px}
 .forecast-sens-cell .pld-future strong{color:var(--ink)}
-.forecast-sens-cell .result{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-sens-cell .result{font-family:'Inter',sans-serif;font-weight:500;
   font-size:22px;color:var(--ink);line-height:1}
-.forecast-sens-cell .delta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-sens-cell .delta{font-family:'JetBrains Mono',monospace;font-size:10px;
   color:var(--muted);letter-spacing:0.04em;margin-top:4px}
 .forecast-sens-cell .delta.is-up{color:var(--ok)}
 .forecast-sens-cell .delta.is-down{color:var(--accent-today)}
@@ -4941,14 +5389,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 /* === Section 7: Risk decomposition === */
 .forecast-decomp{padding:22px 24px;background:var(--panel);
   border:1px solid var(--rule);border-radius:2px}
-.forecast-decomp h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-decomp h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:15px;margin:0 0 8px;color:var(--ink)}
-.forecast-decomp-desc{font-family:'IBM Plex Sans',sans-serif;font-size:12px;
+.forecast-decomp-desc{font-family:'Inter',sans-serif;font-size:12px;
   color:var(--muted);line-height:1.55;margin:0 0 16px;max-width:760px}
 .forecast-decomp-grid{display:flex;flex-direction:column;gap:8px}
 .forecast-decomp-row{display:grid;grid-template-columns:200px 1fr 100px;
   gap:14px;align-items:center;padding:10px 14px;background:var(--bg-alt);
-  border-radius:2px;font-family:'IBM Plex Mono',monospace;font-size:11px}
+  border-radius:2px;font-family:'JetBrains Mono',monospace;font-size:11px}
 @media(max-width:768px){.forecast-decomp-row{grid-template-columns:1fr}}
 .forecast-decomp-row .label{color:var(--ink);letter-spacing:0.04em}
 .forecast-decomp-row .label small{display:block;color:var(--muted);font-size:9px;
@@ -4969,44 +5417,44 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
 /* === Section 8: History tracking === */
 .forecast-history{padding:18px 22px;background:var(--bg-alt);
   border:1px solid var(--rule);border-radius:2px}
-.forecast-history h4{font-family:'Fraunces',Georgia,serif;font-weight:500;
+.forecast-history h4{font-family:'Inter',sans-serif;font-weight:500;
   font-size:15px;margin:0 0 12px;color:var(--ink)}
-.forecast-hist-empty{font-family:'IBM Plex Mono',monospace;font-size:11px;
+.forecast-hist-empty{font-family:'JetBrains Mono',monospace;font-size:11px;
   color:var(--muted);font-style:italic;letter-spacing:0.04em}
 .forecast-hist-row{display:flex;justify-content:space-between;align-items:baseline;
   padding:8px 0;border-bottom:1px dotted var(--rule);
-  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink)}
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink)}
 .forecast-hist-row:last-child{border-bottom:none;font-weight:600}
 .forecast-hist-row .label{color:var(--muted);letter-spacing:0.04em}
 .forecast-hist-row .val{font-variant-numeric:tabular-nums}
-.forecast-hist-row .delta{font-family:'IBM Plex Mono',monospace;font-size:10px;
+.forecast-hist-row .delta{font-family:'JetBrains Mono',monospace;font-size:10px;
   margin-left:8px}
 .forecast-hist-row .delta.is-up{color:var(--ok)}
 .forecast-hist-row .delta.is-down{color:var(--accent-today)}
 
 .forecast-disclaimer{margin:8px 0 0;padding:14px 18px;background:transparent;
-  border-top:1px dashed var(--rule);font-family:'IBM Plex Sans',sans-serif;
+  border-top:1px dashed var(--rule);font-family:'Inter',sans-serif;
   font-size:11px;color:var(--muted);line-height:1.6;font-style:italic;max-width:780px}
 
 
 footer{margin-top:96px;padding-top:32px;border-top:1px solid var(--ink);
-  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);
+  font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);
   line-height:1.8;letter-spacing:0.04em}
 footer p{margin:0 0 10px;max-width:680px}
-footer .colofao{font-family:'Fraunces',Georgia,serif;font-style:italic;
+footer .colofao{font-family:'Inter',sans-serif;font-style:italic;
   font-size:13px;color:var(--ink-2);margin-top:24px}
 
 /* Glossary collapsible */
 .glossary{margin-top:32px;padding:20px 24px;background:var(--bg-alt);
   border:1px solid var(--rule);border-radius:2px}
-.glossary summary{cursor:pointer;font-family:'IBM Plex Mono',monospace;
+.glossary summary{cursor:pointer;font-family:'JetBrains Mono',monospace;
   font-size:11px;letter-spacing:0.18em;text-transform:uppercase;
   color:var(--ink);font-weight:600;outline:none}
 .glossary[open] summary{margin-bottom:16px;
   border-bottom:1px solid var(--rule);padding-bottom:10px}
 .glossary dl{margin:0;display:grid;grid-template-columns:120px 1fr;
   gap:8px 20px;font-size:12px;line-height:1.5}
-.glossary dt{font-family:'IBM Plex Mono',monospace;font-weight:600;
+.glossary dt{font-family:'JetBrains Mono',monospace;font-weight:600;
   color:var(--accent-2);letter-spacing:0.05em}
 .glossary dd{margin:0;color:var(--ink-2)}
 
@@ -5091,6 +5539,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <button class="tab" data-tab="solar" data-i18n="tab_solar">Solar resource</button>
     <button class="tab" data-tab="bench" data-i18n="tab_bench">Benchmark</button>
     <button class="tab" data-tab="setor" data-i18n="tab_setor">Sector context</button>
+    <button class="tab" data-tab="month" data-i18n="tab_month">Monthly drill-down</button>
   </div>
 
   <!-- ============================================================ -->
@@ -5273,7 +5722,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <div class="section-head">
-      <span class="num">I.</span><h3 data-i18n="curt_s1_title">The cadence of cuts</h3>
+      <span class="num">01</span><h3 data-i18n="curt_s1_title">The cadence of cuts</h3>
       <span class="tag" data-i18n="curt_s1_tag">TIME SERIES</span>
     </div>
     <p class="section-desc" data-i18n="curt_s1_desc">
@@ -5283,7 +5732,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="serie" style="height:440px"></div></div>
 
     <div class="section-head">
-      <span class="num">II.</span><h3 data-i18n="curt_s2_title">Why we are cut</h3>
+      <span class="num">02</span><h3 data-i18n="curt_s2_title">Why we are cut</h3>
       <span class="tag" data-i18n="curt_s2_tag">RESTRICTION REASONS</span>
     </div>
     <p class="section-desc" data-i18n="curt_s2_desc">
@@ -5301,7 +5750,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% endif %}
 
     <div class="section-head">
-      <span class="num">III.</span><h3 data-i18n="curt_s3_title">Mauriti vs CE peers</h3>
+      <span class="num">03</span><h3 data-i18n="curt_s3_title">Mauriti vs CE peers</h3>
       <span class="tag" data-i18n="curt_s3_tag">FIXED BENCHMARK</span>
     </div>
     <p class="section-desc">
@@ -5315,7 +5764,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% endif %}
 
     <div class="section-head">
-      <span class="num">IV.</span><h3 data-i18n="curt_s4_title">Where in the day cuts happen</h3>
+      <span class="num">04</span><h3 data-i18n="curt_s4_title">Where in the day cuts happen</h3>
       <span class="tag" data-i18n="curt_s4_tag">HOURLY PATTERN</span>
     </div>
     <p class="section-desc" data-i18n="curt_s4_desc">
@@ -5325,7 +5774,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="heatmap" style="height:440px"></div></div>
 
     <div class="section-head">
-      <span class="num">V.</span><h3 data-i18n="curt_s5_title">Weekly pattern</h3>
+      <span class="num">05</span><h3 data-i18n="curt_s5_title">Weekly pattern</h3>
       <span class="tag" data-i18n="curt_s5_tag">WEEKDAY × HOUR</span>
     </div>
     <p class="section-desc" data-i18n="curt_s5_desc">
@@ -5340,7 +5789,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if razao_breakdown %}
     <div class="section-head">
-      <span class="num">IX.</span>
+      <span class="num">09</span>
       <h3 data-i18n="razao_title">Curtailment by reason · ONS classification</h3>
       <span class="tag" data-i18n="razao_tag">REN 1.030 ELIGIBILITY</span>
     </div>
@@ -5447,7 +5896,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if heatmap_loss and not heatmap_loss.vazio %}
     <div class="section-head">
-      <span class="num">X.</span>
+      <span class="num">10</span>
       <h3 data-i18n="heatloss_title">Financial loss heatmap · current month</h3>
       <span class="tag" data-i18n="heatloss_tag">R$ × HOUR</span>
     </div>
@@ -5479,12 +5928,12 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% if pld_fallback %}
     <div style="background:#fff7e0;border:2px solid #d4a017;
                 padding:24px 28px;margin:0 0 40px;border-radius:2px">
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;
                   color:#a07a00;letter-spacing:0.18em;text-transform:uppercase;
                   font-weight:600;margin-bottom:10px">
         &#9888; <span data-i18n="pld_unavail">PLD unavailable — modulation not computed</span>
       </div>
-      <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;
+      <div style="font-family:'Inter',sans-serif;font-size:17px;
                   line-height:1.5;color:#3d3833;margin-bottom:14px"
            data-i18n="pld_unavail_p">
         Could not retrieve hourly PLD from CCEE in this run (CCEE blocks
@@ -5557,7 +6006,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
           <div class="lbl" data-i18n="vs_bench">vs benchmark</div>
           {% if mod_tracker.delta_pp is not none %}
           <div class="delta {% if mod_tracker.delta_pp < 0 %}up{% else %}down{% endif %}"
-               style="font-size:30px;font-family:Fraunces,Georgia,serif;
+               style="font-size:30px;font-family:'Inter',sans-serif;font-weight:600;letter-spacing:-0.02em;
                       letter-spacing:-0.01em;margin-top:0">
             {% if mod_tracker.delta_pp > 0 %}+{% endif %}{{ "%.2f"|format(mod_tracker.delta_pp) }} pp
           </div>
@@ -5638,7 +6087,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if yoy_modulation and not yoy_modulation.vazio %}
     <div class="section-head">
-      <span class="num">IV.</span>
+      <span class="num">04</span>
       <h3 data-i18n="yoy_title">Year-over-year modulation</h3>
       <span class="tag yoy-tag-{{ yoy_modulation.status }}" data-i18n="yoy_tag_{{ yoy_modulation.status }}">
         {% if yoy_modulation.status == 'worse' %}WORSE{% elif yoy_modulation.status == 'better' %}BETTER{% else %}STABLE{% endif %}
@@ -5708,7 +6157,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
     {% if itm_otm and not itm_otm.vazio %}
     <div class="section-head">
-      <span class="num">V.</span>
+      <span class="num">05</span>
       <h3 data-i18n="itm_title">Hours in/out of the money</h3>
       <span class="tag" data-i18n="itm_tag">SPOT EXPOSURE</span>
     </div>
@@ -5783,7 +6232,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if modulation_alpha and not modulation_alpha.vazio %}
     <div class="section-head">
-      <span class="num">VI.</span>
+      <span class="num">06</span>
       <h3 data-i18n="alpha_title">Modulation alpha · Mauriti vs NE benchmark</h3>
       <span class="tag tag-{% if modulation_alpha.gap_pp < 0 %}neg{% else %}pos{% endif %}"
             data-i18n="alpha_tag">DECOMPOSITION</span>
@@ -5876,7 +6325,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if anomalias and not anomalias.vazio %}
     <div class="section-head">
-      <span class="num">VII.</span>
+      <span class="num">07</span>
       <h3 data-i18n="anom_title">Generation anomalies · last {{ anomalias.lookback_dias }} days</h3>
       {% if anomalias.n_critical > 0 %}
         <span class="tag tag-neg" data-i18n="anom_tag_crit">{{ anomalias.n_critical }} CRITICAL</span>
@@ -5964,7 +6413,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- Foco: projecao financeira do mes corrente (CCEE + Comercial) -->
     <!-- ========================================================= -->
     <div class="section-head">
-      <span class="num">VIII.</span>
+      <span class="num">08</span>
       <h3 data-i18n="forecast_title">Monthly forecast</h3>
       <span class="tag" data-i18n="forecast_tag">INTERACTIVE</span>
     </div>
@@ -6192,7 +6641,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if forecast_proba and not forecast_proba.vazio %}
     <div class="section-head">
-      <span class="num">IX.</span>
+      <span class="num">09</span>
       <h3 data-i18n="proba_title">Probabilistic forecast · P10 / P50 / P90</h3>
       <span class="tag" data-i18n="proba_tag">STATISTICAL BANDS</span>
     </div>
@@ -6278,7 +6727,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% set cb = cenarios.cenarios.base %}
     {% set cp = cenarios.cenarios.pess %}
     <div class="section-head">
-      <span class="num">X.</span>
+      <span class="num">10</span>
       <h3 data-i18n="cen_title">Scenario forecast · Optimistic / Base / Pessimistic</h3>
       <span class="tag" data-i18n="cen_tag">HYPOTHESIS-BASED</span>
     </div>
@@ -6413,7 +6862,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <div class="section-head">
-      <span class="num">I.</span><h3 data-i18n="mod_s1_title">Why we lose revenue</h3>
+      <span class="num">01</span><h3 data-i18n="mod_s1_title">Why we lose revenue</h3>
       <span class="tag" data-i18n="mod_s1_tag">TYPICAL HOURLY PROFILE</span>
     </div>
     <p class="section-desc" data-i18n="mod_s1_desc">
@@ -6424,7 +6873,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="mod_perfil" style="height:420px"></div></div>
 
     <div class="section-head">
-      <span class="num">II.</span><h3 data-i18n="mod_s2_title">Mauriti vs NE solar fleet</h3>
+      <span class="num">02</span><h3 data-i18n="mod_s2_title">Mauriti vs NE solar fleet</h3>
       <span class="tag" data-i18n="mod_s2_tag">MONTHLY HISTORY</span>
     </div>
     <p class="section-desc" data-i18n="mod_s2_desc">
@@ -6435,7 +6884,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="mod_hist" style="height:400px"></div></div>
 
     <div class="section-head">
-      <span class="num">III.</span><h3 data-i18n="mod_s3_title">Most painful days</h3>
+      <span class="num">03</span><h3 data-i18n="mod_s3_title">Most painful days</h3>
       <span class="tag" data-i18n="mod_s3_tag">RANKING BY R$</span>
     </div>
     <p class="section-desc" data-i18n="mod_s3_desc">
@@ -6520,7 +6969,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <div class="section-head">
-      <span class="num">I.</span><h3 data-i18n="ren_s1_title">Eligible volume by month</h3>
+      <span class="num">01</span><h3 data-i18n="ren_s1_title">Eligible volume by month</h3>
       <span class="tag" data-i18n="ren_s1_tag">REL + CNF</span>
     </div>
     <p class="section-desc" data-i18n="ren_s1_desc">
@@ -6530,7 +6979,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="ren_mensal" style="height:380px"></div></div>
 
     <div class="section-head">
-      <span class="num">II.</span><h3 data-i18n="ren_s2_title">Top causes</h3>
+      <span class="num">02</span><h3 data-i18n="ren_s2_title">Top causes</h3>
       <span class="tag" data-i18n="ren_s2_tag">RESTRICTION ORIGIN</span>
     </div>
     <p class="section-desc" data-i18n="ren_s2_desc">
@@ -6545,7 +6994,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="ren_origem" style="height:380px"></div></div>
 
     <div class="section-head">
-      <span class="num">III.</span><h3 data-i18n="ren_s3_title">Event log</h3>
+      <span class="num">03</span><h3 data-i18n="ren_s3_title">Event log</h3>
       <span class="tag" data-i18n="ren_s3_tag">EXPORTABLE</span>
     </div>
     <p class="section-desc" data-i18n="ren_s3_desc">
@@ -6596,7 +7045,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
       </table>
     </div>
     {% if met_ren.n_eventos > eventos_top|length %}
-    <p style="margin-top:14px;font-family:'IBM Plex Mono',monospace;
+    <p style="margin-top:14px;font-family:'JetBrains Mono',monospace;
               font-size:11px;color:var(--muted);letter-spacing:0.05em">
       <span data-i18n="ren_showing">Showing</span> {{ eventos_top|length }}
       <span data-i18n="ren_of">of</span> {{ met_ren.n_eventos }}.
@@ -6685,7 +7134,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     </div>
 
     <div class="section-head">
-      <span class="num">I.</span><h3 data-i18n="solar_s1_title">CF by irradiance bin</h3>
+      <span class="num">01</span><h3 data-i18n="solar_s1_title">CF by irradiance bin</h3>
       <span class="tag" data-i18n="solar_s1_tag">RELATIONSHIP</span>
     </div>
     <p class="section-desc" data-i18n="solar_s1_desc">
@@ -6696,7 +7145,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <div class="chart"><div id="irr_scatter" style="height:380px"></div></div>
 
     <div class="section-head">
-      <span class="num">II.</span><h3 data-i18n="solar_s2_title">Typical hour: sun vs cuts</h3>
+      <span class="num">02</span><h3 data-i18n="solar_s2_title">Typical hour: sun vs cuts</h3>
       <span class="tag" data-i18n="solar_s2_tag">DIURNAL PROFILE</span>
     </div>
     <p class="section-desc" data-i18n="solar_s2_desc">
@@ -6832,7 +7281,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
 
     {% if multimes and not multimes.vazio %}
     <div class="section-head">
-      <span class="num">I.</span>
+      <span class="num">01</span>
       <h3 data-i18n="mm_title">Multi-month comparison · rolling window</h3>
       <span class="tag" data-i18n="mm_tag">SLIDING AVERAGE</span>
     </div>
@@ -6914,7 +7363,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if sistema_brasil and not sistema_brasil.vazio %}
     <div class="section-head">
-      <span class="num">II.</span>
+      <span class="num">02</span>
       <h3 data-i18n="sb_title">Brazilian power system snapshot</h3>
       <span class="tag" data-i18n="sb_tag">SIN · LATEST DAY</span>
     </div>
@@ -7020,7 +7469,7 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     <!-- ========================================================= -->
     {% if reservatorios and not reservatorios.vazio %}
     <div class="section-head">
-      <span class="num">III.</span>
+      <span class="num">03</span>
       <h3 data-i18n="res_title">Reservoir thermometer · Stored Energy (EAR)</h3>
       <span class="tag" data-i18n="res_tag">HYDRO RESERVE</span>
     </div>
@@ -7090,6 +7539,135 @@ html[data-lang="pt"] [data-lang-show="pt"]{display:initial}
     {% endif %}
 
   </div><!-- /tab setor -->
+
+  <!-- ============================================================ -->
+  <!-- TAB: MONTHLY DRILL-DOWN                                       -->
+  <!-- ============================================================ -->
+  <div class="tab-pane" data-tab="month">
+
+    <div class="hero">
+      <div class="kicker" data-i18n="month_kicker">PowerChina · Mauriti · Monthly view</div>
+      <h1>
+        <span data-i18n="month_h1_a">Monthly drill-down</span>
+      </h1>
+      <p class="lede" data-i18n="month_lede">
+        Detalhe completo de cada mês.
+      </p>
+    </div>
+
+    {% if drilldown and not drilldown.vazio %}
+
+    <!-- Seletor de mes (dropdown grande) -->
+    <div class="md-selector-wrap">
+      <label class="md-selector-label" data-i18n="md_select">Selecionar mês</label>
+      <select id="md-month-select" class="md-selector">
+        {% for m in drilldown.meses %}
+        <option value="{{ m.mes_str }}" {% if m.mes_str == drilldown.default_mes %}selected{% endif %}>
+          {{ m.month_label }} {% if m.is_parcial %}(parcial){% endif %}
+          — {{ "%.0f"|format(m.curt_mwh) }} MWh cortados
+        </option>
+        {% endfor %}
+      </select>
+      <span class="md-selector-tip"><span data-i18n="md_tip">11 meses disponíveis · Jul/25 → Mai/26</span></span>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Block A: KPIs do mes (header)               -->
+    <!-- ============================================ -->
+    <div class="section-head">
+      <span class="num">01</span>
+      <h3 data-i18n="md_kpis_title">key indicators</h3>
+      <span class="tag" data-i18n="md_kpis_tag">MONTH SNAPSHOT</span>
+    </div>
+
+    <div class="md-headline" id="md-headline">
+      <!-- preenchido por JS -->
+    </div>
+
+    <div class="md-kpi-grid" id="md-kpi-grid">
+      <!-- 6 cards: MWh, Curt, CF%, Modulação, R$ perdida, PLD efetivo -->
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Block B: Curtailment por razao              -->
+    <!-- ============================================ -->
+    <div class="section-head">
+      <span class="num">02</span>
+      <h3 data-i18n="md_razao_title">curtailment by reason</h3>
+      <span class="tag" data-i18n="md_razao_tag">REL · CNF · ENE · PAR</span>
+    </div>
+    <p class="section-desc" data-i18n="md_razao_desc">
+      Distribuição do volume cortado no mês por código de razão do ONS.
+    </p>
+    <div class="md-razao-grid" id="md-razao-grid">
+      <!-- 5 cards: REL, CNF, ENE, PAR, DESCONHECIDA -->
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Block C: Tabela diaria                      -->
+    <!-- ============================================ -->
+    <div class="section-head">
+      <span class="num">03</span>
+      <h3 data-i18n="md_daily_title">daily breakdown</h3>
+      <span class="tag" data-i18n="md_daily_tag">DAY BY DAY</span>
+    </div>
+    <p class="section-desc" data-i18n="md_daily_desc">
+      Performance diária do mês. Clique numa coluna para ordenar.
+    </p>
+    <div class="md-daily-wrap">
+      <table class="md-daily-table" id="md-daily-table">
+        <thead>
+          <tr>
+            <th class="num" data-sort="dia" data-i18n="md_th_day">Dia</th>
+            <th class="num" data-sort="gen_mwh" data-i18n="md_th_gen">MWh ger</th>
+            <th class="num" data-sort="curt_mwh" data-i18n="md_th_curt">MWh cort</th>
+            <th class="num" data-sort="cf_pct" data-i18n="md_th_cf">CF%</th>
+            <th class="num" data-sort="pld_med" data-i18n="md_th_pld">PLD R$</th>
+            <th class="num" data-sort="perd_rs" data-i18n="md_th_loss">Perda R$</th>
+          </tr>
+        </thead>
+        <tbody id="md-daily-tbody">
+          <!-- preenchido por JS -->
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Block D: Pareto top dias                    -->
+    <!-- ============================================ -->
+    <div class="section-head">
+      <span class="num">04</span>
+      <h3 data-i18n="md_top_title">most painful days</h3>
+      <span class="tag" data-i18n="md_top_tag">TOP 10</span>
+    </div>
+    <p class="section-desc" data-i18n="md_top_desc">
+      Top 10 dias com maior perda em R$ no mês selecionado.
+    </p>
+    <div class="md-top-list" id="md-top-list">
+      <!-- preenchido por JS -->
+    </div>
+
+    <!-- ============================================ -->
+    <!-- Block E: Insights                           -->
+    <!-- ============================================ -->
+    <div class="section-head">
+      <span class="num">05</span>
+      <h3 data-i18n="md_insights_title">insights &amp; comparisons</h3>
+      <span class="tag" data-i18n="md_insights_tag">DERIVED</span>
+    </div>
+    <div class="md-insights" id="md-insights">
+      <!-- preenchido por JS: pior dia, melhor dia, % dias alto, delta vs mes ant -->
+    </div>
+
+    {% else %}
+    <div class="setor-placeholder">
+      <p class="setor-soon"><strong>📊</strong>
+        <span data-i18n="md_no_data">Dados mensais ainda não disponíveis. Volte após o primeiro mês completo.</span>
+      </p>
+    </div>
+    {% endif %}
+
+  </div><!-- /tab month -->
 
   <!-- Glossary -->
   <details class="glossary">
@@ -7705,7 +8283,34 @@ const I18N = {
     res_med_p: "— PLD provavelmente estável, sem pressão extra para curtailment.",
     res_low: "Reservatórios baixos",
     res_low_p: "— PLD elevado esperado, escassez hídrica historicamente correlaciona com maior curtailment de solar/eólica devido a restrições de rede.",
-    setor_ons_unavail: "Dados abertos do ONS temporariamente indisponíveis. O painel do Sistema Brasil e o termômetro de reservatórios aparecerão aqui quando os endpoints do ONS responderem. São publicados diariamente às 12h e 19h BRT."
+    setor_ons_unavail: "Dados abertos do ONS temporariamente indisponíveis. O painel do Sistema Brasil e o termômetro de reservatórios aparecerão aqui quando os endpoints do ONS responderem. São publicados diariamente às 12h e 19h BRT.",
+    // ===== MONTHLY DRILL-DOWN =====
+    tab_month: "Detalhe mensal",
+    month_kicker: "POWERCHINA · MAURITI · VISÃO MENSAL",
+    month_h1_a: "Detalhe mensal",
+    month_lede: "Detalhe completo de cada mês.",
+    md_select: "Selecionar mês",
+    md_tip: "11 meses disponíveis · Jul/25 → Mai/26",
+    md_kpis_title: "indicadores principais",
+    md_kpis_tag: "SNAPSHOT DO MÊS",
+    md_razao_title: "curtailment por razão",
+    md_razao_tag: "REL · CNF · ENE · PAR",
+    md_razao_desc: "Distribuição do volume cortado no mês por código de razão do ONS.",
+    md_daily_title: "detalhamento diário",
+    md_daily_tag: "DIA A DIA",
+    md_daily_desc: "Performance diária do mês. Clique numa coluna para ordenar.",
+    md_th_day: "Dia",
+    md_th_gen: "MWh ger",
+    md_th_curt: "MWh cort",
+    md_th_cf: "CF%",
+    md_th_pld: "PLD R$",
+    md_th_loss: "Perda R$",
+    md_top_title: "dias mais dolorosos",
+    md_top_tag: "TOP 10",
+    md_top_desc: "Top 10 dias com maior perda em R$ no mês selecionado.",
+    md_insights_title: "insights e comparações",
+    md_insights_tag: "DERIVADOS",
+    md_no_data: "Dados mensais ainda não disponíveis. Volte após o primeiro mês completo."
   }
 };
 
@@ -8584,24 +9189,24 @@ function benchRenderMonthly(mauriti, selectedPeers, neFleet, lang) {
       text: (lang === 'pt'
         ? 'Curtailment factor mensal — Mauriti vs peers selecionados'
         : 'Monthly curtailment factor — Mauriti vs selected peers'),
-      font: {family: 'Fraunces, serif', size: 18, color: '#1a1a1a'},
+      font: {family: 'Inter, serif', size: 18, color: '#1a1a1a'},
       x: 0.02, xanchor: 'left', y: 0.96
     },
     xaxis: {
       title: '', gridcolor: '#e8e2d4',
-      tickfont: {family: 'IBM Plex Mono', size: 10}
+      tickfont: {family: 'JetBrains Mono', size: 10}
     },
     yaxis: {
-      title: {text: 'CF (%)', font: {family: 'IBM Plex Mono', size: 11}},
+      title: {text: 'CF (%)', font: {family: 'JetBrains Mono', size: 11}},
       gridcolor: '#e8e2d4', ticksuffix: '%',
-      tickfont: {family: 'IBM Plex Mono', size: 10}
+      tickfont: {family: 'JetBrains Mono', size: 10}
     },
     margin: {l: 70, r: 30, t: 60, b: 100},
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     hovermode: 'x unified',
     legend: {orientation: 'h', x: 0.5, y: -0.18, xanchor: 'center',
-             font: {family: 'IBM Plex Mono', size: 10}},
+             font: {family: 'JetBrains Mono', size: 10}},
     height: 480,
   };
   Plotly.react(el, traces, layout, {
@@ -8625,7 +9230,7 @@ function benchRenderCompare(mauriti, agg, selectedPeers, lang) {
            _fmtGwh(mauriti.mwh_gen) + ' GWh',
            _fmtGwh(mauriti.mwh_curt) + ' GWh'],
     textposition: 'outside',
-    textfont: {family: 'IBM Plex Mono', size: 11},
+    textfont: {family: 'JetBrains Mono', size: 11},
     hovertemplate: '<b>Mauriti</b><br>%{x}: %{y:.2f}<extra></extra>',
   };
   const traces = [trace1];
@@ -8643,7 +9248,7 @@ function benchRenderCompare(mauriti, agg, selectedPeers, lang) {
              _fmtGwh(agg.mwh_gen) + ' GWh',
              _fmtGwh(agg.mwh_curt) + ' GWh'],
       textposition: 'outside',
-      textfont: {family: 'IBM Plex Mono', size: 11},
+      textfont: {family: 'JetBrains Mono', size: 11},
       hovertemplate: `<b>${peerName}</b><br>%{x}: %{y:.2f}<extra></extra>`,
     };
     traces.push(trace2);
@@ -8653,18 +9258,18 @@ function benchRenderCompare(mauriti, agg, selectedPeers, lang) {
       text: (lang === 'pt'
         ? 'Totais do período — comparação direta'
         : 'Period totals — direct comparison'),
-      font: {family: 'Fraunces, serif', size: 16, color: '#1a1a1a'},
+      font: {family: 'Inter, serif', size: 16, color: '#1a1a1a'},
       x: 0.02, xanchor: 'left', y: 0.95
     },
     barmode: 'group', bargap: 0.3, bargroupgap: 0.15,
-    xaxis: {tickfont: {family: 'IBM Plex Sans', size: 12}},
+    xaxis: {tickfont: {family: 'Inter', size: 12}},
     yaxis: {title: '', gridcolor: '#e8e2d4',
-            tickfont: {family: 'IBM Plex Mono', size: 10}},
+            tickfont: {family: 'JetBrains Mono', size: 10}},
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     margin: {l: 60, r: 30, t: 50, b: 80},
     legend: {orientation: 'h', x: 0.5, y: -0.18, xanchor: 'center',
-             font: {family: 'IBM Plex Mono', size: 11}},
+             font: {family: 'JetBrains Mono', size: 11}},
     height: 380,
   };
   Plotly.react(el, traces, layout, {
@@ -8804,7 +9409,7 @@ document.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
   const tabMap = {
     'c': 'curt', 'm': 'mod', 'r': 'ren', 's': 'solar', 'b': 'bench',
-    'x': 'setor',
+    'x': 'setor', 'd': 'month',
   };
   if (key in tabMap) {
     const tab = document.querySelector(`.tab[data-tab="${tabMap[key]}"]`);
@@ -8827,7 +9432,8 @@ document.addEventListener('keydown', (e) => {
       '  R - Aba REN 1.030 tracker\n' +
       '  S - Aba Solar resource\n' +
       '  B - Aba Benchmark\n' +
-      '  X - Aba Setor (contexto)\n\n' +
+      '  X - Aba Setor (contexto)\n' +
+      '  D - Aba Detalhe mensal (drill-down)\n\n' +
       '  D - Toggle Dark/Light mode\n' +
       '  F - Toggle Presentation mode\n' +
       '  P - Print / Save PDF\n' +
@@ -8918,6 +9524,242 @@ function mmInit() {
   mmRenderWindow(6);
 }
 mmInit();
+
+// =============================================================================
+// Monthly Drill-down
+// =============================================================================
+const DRILLDOWN = {{ drilldown_json|safe }};
+
+function _fmt(v, decimals = 0) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  return v.toLocaleString('pt-BR', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  });
+}
+
+function _fmtPct(v, decimals = 1, withSign = false) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  const sign = withSign && v > 0 ? '+' : '';
+  return sign + v.toLocaleString('pt-BR', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  }) + '%';
+}
+
+function _fmtDelta(v, suffix = '%', isPp = false) {
+  if (v === null || v === undefined || isNaN(v)) return '—';
+  const sign = v > 0 ? '+' : '';
+  const value = sign + v.toLocaleString('pt-BR', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  });
+  return value + (isPp ? ' pp' : suffix);
+}
+
+function _deltaClass(v, invertColors = false) {
+  if (v === null || v === undefined || isNaN(v)) return '';
+  // Para volumes/perdas: positivo = ruim (vermelho); para CF/modulacao: pode ser invertido
+  if (invertColors) v = -v;
+  if (Math.abs(v) < 1) return 'neutral';
+  return v > 0 ? 'neg' : 'pos';
+}
+
+function mdRenderMonth(mesStr) {
+  if (!DRILLDOWN || DRILLDOWN.vazio) return;
+  const m = DRILLDOWN.meses.find(x => x.mes_str === mesStr);
+  if (!m) return;
+
+  // ----- Headline -----
+  const headline = document.getElementById('md-headline');
+  const parcialBadge = m.is_parcial
+    ? '<span class="md-badge md-parcial">PARCIAL · ' + m.n_dias_total + ' dias</span>'
+    : '<span class="md-badge md-complete">COMPLETO · ' + m.n_dias_total + ' dias</span>';
+  headline.innerHTML = `
+    <div class="md-headline-left">
+      <div class="md-month-name">${m.month_label}</div>
+      <div class="md-month-meta">${parcialBadge}</div>
+    </div>
+    ${m.delta ? `
+    <div class="md-headline-right">
+      <span class="md-compare-label">vs ${m.delta.prev_label}</span>
+      <span class="md-compare-pill ${_deltaClass(m.delta.curt_mwh_pct)}">
+        curt ${_fmtDelta(m.delta.curt_mwh_pct)}
+      </span>
+      <span class="md-compare-pill ${_deltaClass(m.delta.perd_rs_pct)}">
+        perda ${_fmtDelta(m.delta.perd_rs_pct)}
+      </span>
+    </div>
+    ` : `<div class="md-headline-right md-no-prev">primeiro mês disponível</div>`}
+  `;
+
+  // ----- KPI grid (6 cards) -----
+  const kpiGrid = document.getElementById('md-kpi-grid');
+  const kpis = [
+    { label: 'MWh gerados', value: _fmt(m.mwh_total), unit: 'MWh',
+      delta: m.delta ? m.delta.mwh_total_pct : null, color: 'neutral' },
+    { label: 'MWh cortados', value: _fmt(m.curt_mwh), unit: 'MWh',
+      delta: m.delta ? m.delta.curt_mwh_pct : null, color: 'accent',
+      deltaInvert: true },
+    { label: 'CF%', value: _fmtPct(m.cf_pct, 2), unit: '',
+      delta: m.delta ? m.delta.cf_pct_pp : null, color: 'accent',
+      deltaInvert: true, isPp: true },
+    { label: 'Modulação', value: _fmtPct(m.desconto_pct, 2, true), unit: '',
+      delta: m.delta ? m.delta.desconto_pp : null, color: 'ok',
+      isPp: true },
+    { label: 'Perda total', value: 'R$ ' + _fmt(m.perd_rs/1e6, 2), unit: 'M',
+      delta: m.delta ? m.delta.perd_rs_pct : null, color: 'accent',
+      deltaInvert: true },
+    { label: 'PLD efetivo', value: 'R$ ' + _fmt(m.pld_efetivo, 0), unit: '/MWh',
+      delta: m.delta ? m.delta.pld_spot_pct : null, color: 'neutral' },
+  ];
+  kpiGrid.innerHTML = kpis.map(k => `
+    <div class="md-kpi-card md-kpi-${k.color}">
+      <div class="md-kpi-label">${k.label}</div>
+      <div class="md-kpi-val">${k.value}<span class="md-kpi-unit">${k.unit}</span></div>
+      ${k.delta !== null && k.delta !== undefined ? `
+        <div class="md-kpi-delta ${_deltaClass(k.delta, k.deltaInvert)}">
+          ${_fmtDelta(k.delta, '%', k.isPp)} <span class="md-kpi-delta-lbl">vs ant.</span>
+        </div>
+      ` : '<div class="md-kpi-delta md-empty">—</div>'}
+    </div>
+  `).join('');
+
+  // ----- Razao grid -----
+  const razaoGrid = document.getElementById('md-razao-grid');
+  const razaoOrder = ['REL', 'CNF', 'ENE', 'PAR', 'DESCONHECIDA'];
+  const razaoColors = { REL: 'accent', CNF: 'warn', ENE: 'neutral',
+                         PAR: 'neutral', DESCONHECIDA: 'muted' };
+  razaoGrid.innerHTML = razaoOrder.map(code => {
+    const rz = m.razao[code] || { mwh: 0, pct: 0, n_horas: 0, label: code };
+    return `
+      <div class="md-razao-card md-razao-${razaoColors[code]}">
+        <div class="md-razao-code">${code}</div>
+        <div class="md-razao-label">${rz.label}</div>
+        <div class="md-razao-mwh">${_fmt(rz.mwh, 0)}<span class="md-razao-unit">MWh</span></div>
+        <div class="md-razao-pct">${_fmtPct(rz.pct, 1)}</div>
+        <div class="md-razao-bar"><div class="md-razao-fill" style="width:${rz.pct.toFixed(0)}%"></div></div>
+      </div>
+    `;
+  }).join('');
+
+  // ----- Tabela diaria -----
+  const tbody = document.getElementById('md-daily-tbody');
+  tbody.innerHTML = m.diaria.map(d => `
+    <tr>
+      <td class="num"><strong>${d.dia}</strong></td>
+      <td class="num">${_fmt(d.gen_mwh, 0)}</td>
+      <td class="num ${d.curt_mwh > 0 ? 'has-curt' : 'no-curt'}">${_fmt(d.curt_mwh, 0)}</td>
+      <td class="num">${_fmtPct(d.cf_pct, 1)}</td>
+      <td class="num">${_fmt(d.pld_med, 0)}</td>
+      <td class="num ${d.perd_rs > 0 ? 'has-loss' : 'no-loss'}">R$ ${_fmt(d.perd_rs/1000, 1)}k</td>
+    </tr>
+  `).join('');
+  window.__md_current_daily = m.diaria;  // pra sort
+
+  // ----- Top 10 dias -----
+  const topList = document.getElementById('md-top-list');
+  topList.innerHTML = m.top_dias.map((d, i) => `
+    <div class="md-top-row">
+      <div class="md-top-rank">${(i+1).toString().padStart(2, '0')}</div>
+      <div class="md-top-day">Dia ${d.dia}</div>
+      <div class="md-top-bar-wrap">
+        <div class="md-top-bar" style="width:${Math.min(100, 100*d.perd_rs / (m.top_dias[0].perd_rs || 1)).toFixed(1)}%"></div>
+      </div>
+      <div class="md-top-vals">
+        <span class="md-top-curt">${_fmt(d.curt_mwh, 0)} MWh</span>
+        <span class="md-top-loss">R$ ${_fmt(d.perd_rs/1000, 1)}k</span>
+      </div>
+    </div>
+  `).join('');
+
+  // ----- Insights -----
+  const insights = document.getElementById('md-insights');
+  insights.innerHTML = `
+    <div class="md-insight-card md-insight-bad">
+      <div class="md-insight-icon">💥</div>
+      <div class="md-insight-body">
+        <div class="md-insight-label">Pior dia do mês</div>
+        <div class="md-insight-val">Dia ${m.pior_dia ? m.pior_dia.dia : '—'}</div>
+        <div class="md-insight-sub">
+          ${m.pior_dia ? _fmt(m.pior_dia.curt_mwh, 0) + ' MWh · R$ ' + _fmt(m.pior_dia.perd_rs/1000, 1) + 'k perdidos' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="md-insight-card md-insight-good">
+      <div class="md-insight-icon">✨</div>
+      <div class="md-insight-body">
+        <div class="md-insight-label">Melhor dia do mês</div>
+        <div class="md-insight-val">Dia ${m.melhor_dia ? m.melhor_dia.dia : '—'}</div>
+        <div class="md-insight-sub">
+          ${m.melhor_dia ? _fmt(m.melhor_dia.curt_mwh, 0) + ' MWh cortados' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="md-insight-card md-insight-neutral">
+      <div class="md-insight-icon">📊</div>
+      <div class="md-insight-body">
+        <div class="md-insight-label">Dias com CF&gt;10%</div>
+        <div class="md-insight-val">${m.n_dias_curt_alto} <span style="font-size:14px;color:#888">/ ${m.n_dias_total}</span></div>
+        <div class="md-insight-sub">${_fmtPct(m.pct_dias_curt_alto, 0)} dos dias</div>
+      </div>
+    </div>
+    ${m.delta ? `
+    <div class="md-insight-card md-insight-compare">
+      <div class="md-insight-icon">📈</div>
+      <div class="md-insight-body">
+        <div class="md-insight-label">vs ${m.delta.prev_label}</div>
+        <div class="md-insight-val ${_deltaClass(m.delta.curt_mwh_pct, true)}" style="font-size:18px">${_fmtDelta(m.delta.curt_mwh_pct)}</div>
+        <div class="md-insight-sub">em MWh cortados</div>
+      </div>
+    </div>
+    ` : ''}
+  `;
+}
+
+function mdInit() {
+  if (!DRILLDOWN || DRILLDOWN.vazio) return;
+  const sel = document.getElementById('md-month-select');
+  if (!sel) return;
+
+  sel.addEventListener('change', (e) => {
+    mdRenderMonth(e.target.value);
+  });
+
+  // Sort columns
+  document.querySelectorAll('#md-daily-table th[data-sort]').forEach(th => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      const currentDir = th.dataset.dir === 'desc' ? 'asc' : 'desc';
+      th.dataset.dir = currentDir;
+      document.querySelectorAll('#md-daily-table th').forEach(o => {
+        if (o !== th) delete o.dataset.dir;
+      });
+      const data = window.__md_current_daily || [];
+      const sorted = [...data].sort((a, b) => {
+        const va = a[key]; const vb = b[key];
+        if (currentDir === 'desc') return vb - va;
+        return va - vb;
+      });
+      const tbody = document.getElementById('md-daily-tbody');
+      tbody.innerHTML = sorted.map(d => `
+        <tr>
+          <td class="num"><strong>${d.dia}</strong></td>
+          <td class="num">${_fmt(d.gen_mwh, 0)}</td>
+          <td class="num ${d.curt_mwh > 0 ? 'has-curt' : 'no-curt'}">${_fmt(d.curt_mwh, 0)}</td>
+          <td class="num">${_fmtPct(d.cf_pct, 1)}</td>
+          <td class="num">${_fmt(d.pld_med, 0)}</td>
+          <td class="num ${d.perd_rs > 0 ? 'has-loss' : 'no-loss'}">R$ ${_fmt(d.perd_rs/1000, 1)}k</td>
+        </tr>
+      `).join('');
+    });
+  });
+
+  // Render default
+  mdRenderMonth(DRILLDOWN.default_mes);
+}
+mdInit();
 </script>
 
 </body>
@@ -9338,6 +10180,13 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
                       f"curt {jw['curt_mwh_total']:,.0f} MWh, "
                       f"perda R$ {jw['perd_rs_total']/1e6:.2f}M")
 
+    # ========== Monthly Drill-down ==========
+    drilldown = calcular_drilldown_mensal(mauriti.df, diario_m,
+                                                mod_mensal_data, today)
+    if not drilldown.get("vazio"):
+        print(f"[*] Monthly drill-down: {drilldown['n_meses']} meses processados, "
+              f"default={drilldown['default_mes']}")
+
     # ========== ONDA 4B: Sistema Brasil + Reservatorios ==========
     sistema_brasil = calcular_sistema_brasil(ons_balanco_atual,
                                                   ons_balanco_anterior)
@@ -9702,6 +10551,8 @@ def gerar_html(mauriti: Selecao, grupos: list[Grupo], pld: pd.DataFrame,
         multimes_json=json.dumps(multimes, default=str),
         sistema_brasil=sistema_brasil,
         reservatorios=reservatorios,
+        drilldown=drilldown,
+        drilldown_json=json.dumps(drilldown, default=str),
         figs_json=json.dumps(figs),
         insights_m=_gera_insights_mauriti(mauriti.df, met_m),
         insights_c=_gera_insights_comp(met_m, met_b),
