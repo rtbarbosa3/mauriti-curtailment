@@ -25,26 +25,26 @@
   },
   "trend_30_90_365": {
     "direction": "estavel",
-    "cf_30d_pct": 23.49,
-    "cf_90d_pct": 25.77,
-    "cf_365d_pct": 22.84,
-    "delta_30_vs_365_pp": 0.65
+    "cf_30d_pct": 23.72,
+    "cf_90d_pct": 25.88,
+    "cf_365d_pct": 22.91,
+    "delta_30_vs_365_pp": 0.81
   },
   "month_to_date": null,
   "vs_peers": {
     "n_peer_groups": 7,
-    "mauriti_cf_pct": 22.84,
+    "mauriti_cf_pct": 22.91,
     "peers_cf_pct": 26.76,
-    "delta_pp": -3.92
+    "delta_pp": -3.85
   },
   "vs_ne_fleet_modulation": {
     "mauriti_disc_pct": -27.34,
     "ne_fleet_disc_pct": -26.04
   },
   "totals_period": {
-    "mwh_curtailed": 93848.0,
-    "lost_revenue_rs": 9960887.0,
-    "cf_pct": 22.84,
+    "mwh_curtailed": 94224.0,
+    "lost_revenue_rs": 10036189.0,
+    "cf_pct": 22.91,
     "ren_eligible_events": 1383,
     "ren_eligible_mwh": 14822.0
   }
