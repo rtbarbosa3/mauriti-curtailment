@@ -1,13 +1,13 @@
 date_start,time_start,date_end,time_end,duration_h,plant,reason,origin_code,origin_label,mwh_curtailed,pld_avg_rs_mwh
-2026-06-18,07:00,2026-06-18,08:00,1.500,Mauriti 9,REL,SIS,SIS — Systemic (regional grid),14.800,201.670
-2026-06-18,07:00,2026-06-18,08:00,1.500,Mauriti 5,REL,SIS,SIS — Systemic (regional grid),12.171,201.670
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 4,REL,SIS,SIS — Systemic (regional grid),44.339,202.052
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 7,REL,SIS,SIS — Systemic (regional grid),11.702,202.052
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 3,REL,SIS,SIS — Systemic (regional grid),35.645,202.052
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 1,REL,SIS,SIS — Systemic (regional grid),38.112,202.052
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 2,REL,SIS,SIS — Systemic (regional grid),14.497,202.052
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 6,REL,SIS,SIS — Systemic (regional grid),24.721,201.930
-2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 8,REL,SIS,SIS — Systemic (regional grid),36.893,202.052
+2026-06-18,07:00,2026-06-18,08:00,1.500,Mauriti 9,REL,SIS,SIS — Systemic (regional grid),7.400,201.670
+2026-06-18,07:00,2026-06-18,08:00,1.500,Mauriti 5,REL,SIS,SIS — Systemic (regional grid),6.086,201.670
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 4,REL,SIS,SIS — Systemic (regional grid),22.170,202.052
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 7,REL,SIS,SIS — Systemic (regional grid),5.851,202.052
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 3,REL,SIS,SIS — Systemic (regional grid),17.823,202.052
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 1,REL,SIS,SIS — Systemic (regional grid),19.056,202.052
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 2,REL,SIS,SIS — Systemic (regional grid),7.248,202.052
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 6,REL,SIS,SIS — Systemic (regional grid),12.360,201.930
+2026-06-18,06:30,2026-06-18,08:00,2.000,Mauriti 8,REL,SIS,SIS — Systemic (regional grid),18.447,202.052
 2026-05-28,07:30,2026-05-28,08:00,1.000,Mauriti 6,REL,LOC,LOC — Local (near plant),21.167,176.185
 2026-05-28,07:30,2026-05-28,08:00,1.000,Mauriti 8,REL,LOC,LOC — Local (near plant),21.299,176.185
 2026-05-28,07:30,2026-05-28,08:00,1.000,Mauriti 2,REL,LOC,LOC — Local (near plant),3.338,176.185
