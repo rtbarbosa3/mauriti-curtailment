@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-07-13",
-  "period": "01/07/2025 a 13/07/2026",
+  "generated_at": "2026-07-14",
+  "period": "01/07/2025 a 14/07/2026",
   "submarket": "NE",
   "dashboard_url": "https://rtbarbosa3.github.io/mauriti-curtailment/",
   "csv_url": "https://rtbarbosa3.github.io/mauriti-curtailment/eventos_elegiveis_ren1030.csv",
@@ -25,10 +25,10 @@
   },
   "trend_30_90_365": {
     "direction": "estavel",
-    "cf_30d_pct": 18.77,
-    "cf_90d_pct": 22.59,
+    "cf_30d_pct": 19.26,
+    "cf_90d_pct": 22.52,
     "cf_365d_pct": 22.15,
-    "delta_30_vs_365_pp": -3.38
+    "delta_30_vs_365_pp": -2.89
   },
   "month_to_date": {
     "vazio": false,
