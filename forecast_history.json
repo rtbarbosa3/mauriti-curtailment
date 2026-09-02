@@ -1,0 +1,16 @@
+[
+  {
+    "today_str": "2026-09-02",
+    "cur_month": "2026-09",
+    "mwh_realized": 2851.4,
+    "mwh_total_forecast": 85541.9,
+    "daily_avg": 2851.4,
+    "pld_efetivo_mauriti": 78.86,
+    "pld_mtd_por_sub": {
+      "N": 225.37,
+      "NE": 224.32,
+      "S": 226.36,
+      "SECO": 226.37
+    }
+  }
+]
