@@ -1,16 +1,16 @@
 [
   {
-    "today_str": "2026-09-13",
+    "today_str": "2026-09-14",
     "cur_month": "2026-09",
-    "mwh_realized": 26163.8,
-    "mwh_total_forecast": 65409.4,
-    "daily_avg": 2180.3,
-    "pld_efetivo_mauriti": 78.15,
+    "mwh_realized": 27539.5,
+    "mwh_total_forecast": 63552.7,
+    "daily_avg": 2118.4,
+    "pld_efetivo_mauriti": 77.14,
     "pld_mtd_por_sub": {
-      "N": 146.36,
-      "NE": 145.96,
-      "S": 146.62,
-      "SECO": 146.63
+      "N": 142.4,
+      "NE": 142.03,
+      "S": 142.65,
+      "SECO": 142.65
     }
   }
 ]
