@@ -1,16 +1,16 @@
 {
-  "generated_at": "2026-11-21",
-  "period": "01/07/2025 a 21/11/2026",
+  "generated_at": "2026-11-22",
+  "period": "01/07/2025 a 22/11/2026",
   "submarket": "NE",
   "dashboard_url": "https://rtbarbosa3.github.io/mauriti-curtailment/",
   "csv_url": "https://rtbarbosa3.github.io/mauriti-curtailment/eventos_elegiveis_ren1030.csv",
   "most_recent_day": {
-    "date": "2026-11-20",
-    "date_br": "20/11/2026",
-    "cf_pct": 48.45,
-    "mwh_curtailed": 1407.6,
-    "mwh_estimated": 2905.3,
-    "mwh_generated": 1527.0,
+    "date": "2026-11-21",
+    "date_br": "21/11/2026",
+    "cf_pct": 24.24,
+    "mwh_curtailed": 746.0,
+    "mwh_estimated": 3078.0,
+    "mwh_generated": 2354.2,
     "pld_avg_rs_mwh": 0.0,
     "pld_effective_rs_mwh": 0.0,
     "modulation_disc_pct": 0.0,
@@ -18,44 +18,44 @@
     "ren_events": 0,
     "ren_mwh_eligible": 0.0,
     "worst_hour": {
-      "hour": 10,
-      "mwh": 231.8,
+      "hour": 11,
+      "mwh": 133.3,
       "pld": 57.31
     }
   },
   "trend_30_90_365": {
     "direction": "estavel",
-    "cf_30d_pct": 18.99,
-    "cf_90d_pct": 25.29,
-    "cf_365d_pct": 23.16,
-    "delta_30_vs_365_pp": -4.17
+    "cf_30d_pct": 19.47,
+    "cf_90d_pct": 24.76,
+    "cf_365d_pct": 23.17,
+    "delta_30_vs_365_pp": -3.7
   },
   "month_to_date": {
     "vazio": false,
-    "n_dias": 20,
-    "mwh_total": 42160.04296875,
-    "receita_real": 2417631.015742074,
-    "receita_flat": 3973497.333300578,
-    "desconto_rs": -1555866.3175585037,
-    "desconto_pct": -39.15609316053388,
-    "pld_medio": 93.74129166666667,
-    "pld_efetivo": 57.344130733786926,
+    "n_dias": 21,
+    "mwh_total": 44514.265625,
+    "receita_real": 2552551.622443431,
+    "receita_flat": 4108417.93167216,
+    "desconto_rs": -1555866.309228729,
+    "desconto_pct": -37.87020539547394,
+    "pld_medio": 92.00646825396825,
+    "pld_efetivo": 57.342328051569,
     "pior_dia": "17",
     "pior_pct": -81.8540458196013
   },
   "vs_peers": {
     "n_peer_groups": 7,
     "mauriti_cf_pct": 23.55,
-    "peers_cf_pct": 26.69,
+    "peers_cf_pct": 26.7,
     "delta_pp": -3.15
   },
   "vs_ne_fleet_modulation": {
-    "mauriti_disc_pct": -30.28,
-    "ne_fleet_disc_pct": -28.41
+    "mauriti_disc_pct": -30.25,
+    "ne_fleet_disc_pct": -28.39
   },
   "totals_period": {
-    "mwh_curtailed": 184336.0,
-    "lost_revenue_rs": 15806862.0,
+    "mwh_curtailed": 185082.0,
+    "lost_revenue_rs": 15849617.0,
     "cf_pct": 23.55,
     "ren_eligible_events": 1488,
     "ren_eligible_mwh": 15974.0
